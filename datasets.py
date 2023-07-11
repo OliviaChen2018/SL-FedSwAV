@@ -5,7 +5,7 @@ import torchvision
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 from torch.utils.data import TensorDataset, DataLoader
-from utils import GaussianBlur, get_multiclient_trainloader_list
+from utils import GaussianBlur, get_multiclient_trainloader_list, CustomSubset, partition_data
 from PIL import Image
 import os
 
@@ -50,18 +50,19 @@ def denormalize(x, dataset): # normalize a zero mean, std = 1 to range [0, 1]
     return torch.clamp(tensor, 0, 1).permute(3, 0, 1, 2)
 
 
-def get_cifar10(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+def get_cifar10(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
     if pairloader_option != "None":
         if data_proportion > 0.0:
             # train_loader用于contrastive fl的训练, 是一个包含所有client train_dataloader的list；
             # test_loader用于validate
             # mem_loader也是一个包含所有client dataloader的list；
-            train_loader = get_cifar10_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
+#             train_loader = get_cifar10_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
+            train_loader, traindata_cls_counts = get_cifar10_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data)
         else:
             train_loader = None
         mem_loader = get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
         test_loader = get_cifar10_testloader(128, num_workers, False, path_to_data)
-        return train_loader, mem_loader, test_loader
+        return train_loader, traindata_cls_counts, mem_loader, test_loader
     else:
         if data_proportion > 0.0:
             train_loader = get_cifar10_trainloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, augmentation_option, hetero, hetero_string, path_to_data)
@@ -235,6 +236,78 @@ def get_cifar100_pairloader(batch_size=16, num_workers=2, shuffle=True, num_clie
     cifar100_training_loader = get_multiclient_trainloader_list(train_data, num_client, shuffle, num_workers, batch_size, noniid_ratio, 100, hetero, hetero_string)
     
     return cifar100_training_loader
+
+def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition = 'noniid', hetero = False, path_to_data = "./data"):
+    class CIFAR10Pair(torchvision.datasets.CIFAR10):
+        """CIFAR10 Dataset.
+        """
+#         def __init__(self, dataset, indices):
+#             super().__init__(dataset, 
+#                              indices, 
+#                              root=path_to_data, 
+#                              train=True, 
+#                              transform=train_transform, 
+#                              download=True)
+#             self.dataset = dataset
+# #             self.indices = [int(i) for i in indices]
+#             if torchvision.__version__ == '0.2.1':
+#                 self.target = dataset.train_labels
+#     #             data, self.target = train_data.train_data, np.array(train_data.train_labels) 
+#                 #torchvision.datasets.CIFAR10官方类自己会处理train_data或test_data。
+#             else:
+#     #             data = train_data.data
+#                 self.targets = dataset.targets
+#         #             self.classes = dataset.classes # 保留classes属性
+        def __getitem__(self, index):
+            img = self.data[index]
+            img = Image.fromarray(img)
+            if self.transform is not None:
+                im_1 = self.transform(img)
+                im_2 = self.transform(img)
+
+            return im_1, im_2
+    if pairloader_option == "mocov1":
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(32),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_TRAIN_MEAN, CIFAR10_TRAIN_STD)])
+    elif pairloader_option == "mocov2":
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(32),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_TRAIN_MEAN, CIFAR10_TRAIN_STD)])
+    else:
+        train_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_TRAIN_MEAN, CIFAR10_TRAIN_STD)])
+    # data prepare
+    
+    train_data = CIFAR10Pair(root=path_to_data, 
+                             train=True, 
+                             transform=train_transform, 
+                             download=True) #train_data中包含若干个img pair元组
+    target = np.array(train_data.targets)
+#     data_portion=0.1
+#     indices = torch.randperm(len(train_data))[:int(len(train_data)* data_portion)]
+    # 按照data_portion的比例，从train_data中随机选出部分样本作为训练集。
+
+#     train_target = target[indices]
+    
+    # data表示数据集中的所有样本值，target表示样本标签。
+#     print(len(train_target))
+    
+    cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4)
+    
+#     cifar10_training_loader = get_multiclient_trainloader_list(train_data, num_client, shuffle, num_workers, batch_size, noniid_ratio, 10, hetero, hetero_string)
+    
+    return cifar10_training_loader, traindata_cls_counts
 
 def get_cifar10_pairloader(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, noniid_ratio = 1.0, pairloader_option = "None", hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
     class CIFAR10Pair(torchvision.datasets.CIFAR10):

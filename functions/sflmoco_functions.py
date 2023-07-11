@@ -70,7 +70,7 @@ class sflmoco_simulator(base_simulator):
         """
         Run Linear evaluation（linear_eval用于最终的测试）
         """
-        self.cuda() # self是个simulator，base_simulator中对simulator.cuda()或.eval()等的定义：遍历self的所有model，并执行.cuda()或.eval()操作。
+        self.cuda(self.device) # self是个simulator，base_simulator中对simulator.cuda()或.eval()等的定义：遍历self的所有model，并执行.cuda()或.eval()操作。
         self.eval()  #set to eval mode
         criterion = nn.CrossEntropyLoss()
 
@@ -102,7 +102,7 @@ class sflmoco_simulator(base_simulator):
         linear_optimizer = torch.optim.Adam(list(linear_classifier.parameters()))
         linear_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(linear_optimizer, num_epochs//4)  # learning rate decay 
 
-        linear_classifier.cuda()
+        linear_classifier.cuda(self.device)
         linear_classifier.train()
         
         best_avg_accu = 0.0
@@ -111,8 +111,8 @@ class sflmoco_simulator(base_simulator):
         for epoch in range(num_epochs):
             for input, label in memloader[0]:
                 linear_optimizer.zero_grad()
-                input = input.cuda()
-                label = label.cuda()
+                input = input.to(self.device)
+                label = label.to(self.device)
                 with torch.no_grad():
                     output = self.model.local_list[0](input)
                     output = self.model.cloud(output)
@@ -134,8 +134,8 @@ class sflmoco_simulator(base_simulator):
             linear_classifier.eval()
 
             for input, target in self.validate_loader:
-                input = input.cuda()
-                target = target.cuda()
+                input = input.to(self.device)
+                target = target.to(self.device)
                 with torch.no_grad():
                     output = self.model.local_list[0](input)
                     output = self.model.cloud(output)
@@ -160,7 +160,7 @@ class sflmoco_simulator(base_simulator):
         """
         Run Linear evaluation
         """
-        self.cuda()
+        self.cuda(self.device)
         self.eval()  #set to eval mode
         criterion = nn.CrossEntropyLoss()
 
@@ -179,7 +179,7 @@ class sflmoco_simulator(base_simulator):
         milestones = [int(0.6*num_epochs), int(0.8*num_epochs)]
         linear_scheduler = torch.optim.lr_scheduler.MultiStepLR(linear_optimizer, milestones=milestones, gamma=0.1)  # learning rate decay 
 
-        semi_classifier.cuda()
+        semi_classifier.cuda(self.device)
         semi_classifier.train()
         avg_pool = nn.AdaptiveAvgPool2d((1,1))
         best_avg_accu = 0.0
@@ -187,8 +187,8 @@ class sflmoco_simulator(base_simulator):
         for epoch in range(num_epochs):
             for input, label in memloader[0]:
                 linear_optimizer.zero_grad()
-                input = input.cuda()
-                label = label.cuda()
+                input = input.to(self.device)
+                label = label.to(self.device)
                 with torch.no_grad():
                     output = self.model.local_list[0](input)
                     output = self.model.cloud(output)
@@ -210,8 +210,8 @@ class sflmoco_simulator(base_simulator):
             semi_classifier.eval()
 
             for input, target in self.validate_loader:
-                input = input.cuda()
-                target = target.cuda()
+                input = input.to(self.device)
+                target = target.to(self.device)
                 with torch.no_grad():
                     output = self.model.local_list[0](input)
                     output = self.model.cloud(output)
@@ -235,7 +235,7 @@ class sflmoco_simulator(base_simulator):
     def knn_eval(self, memloader): # Use linear evaluation memloader作为KNN的已知样本点数据集
         '''用于每个epoch训练之后的验证'''
         if self.c_instance_list:
-            self.c_instance_list[0].cuda()
+            self.c_instance_list[0].cuda(self.device)
         # test using a knn monitor
         def test():
             self.eval() # 将self的所有model设置为eval mode
@@ -244,19 +244,19 @@ class sflmoco_simulator(base_simulator):
             with torch.no_grad():
                 # generate feature bank
                 for data, target in memloader[0]: # memloader是一个list，其中的元素才是DataLoader。
-                    feature = self.model(data.cuda(non_blocking=True)) # self.model的forward函数默认使用client_id=0，即client-side model使用第0个模型。(resnet.py)
+                    feature = self.model(data.to(self.device, non_blocking=True)) # self.model的forward函数默认使用client_id=0，即client-side model使用第0个模型。(resnet.py)
                     feature = F.normalize(feature, dim=1)
                     feature_bank.append(feature)
                     feature_labels.append(target) 
                     # target和feature都是tensor([x,x,x])的形式，因此此循环结束时的feature_labels为[tensor([x,x,,...],tensor([x,x,...],...))]的形式。而之后的torch.cat(feature_labels,dim=0)操作会将feature_labels列表中的所有tensor合并为一个tensor，即tensor([x,x,x,...])
                 # [D, N] (做了个转置，方便后面做乘法。每列代表一条数据的表征)
-                feature_bank = torch.cat(feature_bank, dim=0).t().contiguous().cuda()
+                feature_bank = torch.cat(feature_bank, dim=0).t().contiguous().to(self.device)
                 # [N]
-                feature_labels = torch.cat(feature_labels, dim=0).contiguous().cuda()
+                feature_labels = torch.cat(feature_labels, dim=0).contiguous().to(self.device)
                 # feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=feature_bank.device)
                 # loop test data to predict the label by weighted knn search
                 for data, target in self.validate_loader:
-                    data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
+                    data, target = data.to(self.device, non_blocking=True), target.to(self.device, non_blocking=True)
                     # 这里non_blocking=True使得data和target的加载可以并行进行
                     feature = self.model(data)
                     feature = F.normalize(feature, dim=1)
@@ -308,6 +308,7 @@ class create_sflmocoserver_instance(create_base_instance):
     def __init__(self, model, criterion, args, server_input_size = 1, feature_sharing = True) -> None:
         super().__init__(model)
         self.criterion = criterion
+        self.device = args.device
         self.t_model = copy.deepcopy(model) 
         # 这是创建server_instance的类，传入的model是server-side model
         self.symmetric = args.symmetric
@@ -322,7 +323,7 @@ class create_sflmocoserver_instance(create_base_instance):
 
         self.feature_sharing = feature_sharing
         if self.feature_sharing:
-            self.queue = torch.randn(args.K_dim, self.K).cuda() #K_dim: key中向量的维度
+            self.queue = torch.randn(args.K_dim, self.K).to(self.device) #K_dim: key中向量的维度
             #队列的初值为随机值（这个队列是横着的，每个feature是竖着的）
             self.queue = nn.functional.normalize(self.queue, dim=0) # 对队列中的每个列向量标准化
             self.queue_ptr = torch.zeros(1, dtype=torch.long) #queue_ptr表示队列的指针，初值为[0]
@@ -331,7 +332,7 @@ class create_sflmocoserver_instance(create_base_instance):
             self.queue = []
             self.queue_ptr = []
             for _ in range(self.num_client):
-                self.queue.append(torch.randn(args.K_dim, self.K).cuda()) # queue中包含了若干个子队列
+                self.queue.append(torch.randn(args.K_dim, self.K).to(self.device)) # queue中包含了若干个子队列
                 self.queue_ptr.append(torch.zeros(1, dtype=torch.long))
                 
     def __call__(self, input):
@@ -388,7 +389,7 @@ class create_sflmocoserver_instance(create_base_instance):
         Batch shuffle, for making use of BatchNorm. 为什么BN需要打乱batch？
         """
         # random shuffle index
-        idx_shuffle = torch.randperm(x.shape[0]).cuda()
+        idx_shuffle = torch.randperm(x.shape[0]).to(self.device)
 
         # index for restoring
         idx_unshuffle = torch.argsort(idx_shuffle) # idx_unshuffle表示还原batch顺序所对应的下标
@@ -437,7 +438,7 @@ class create_sflmocoserver_instance(create_base_instance):
 
         logits /= self.T
         
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.device)
 
         loss = self.criterion(logits, labels) #CELoss
 
@@ -479,9 +480,9 @@ class create_sflmocoserver_instance(create_base_instance):
 
         return error, gradient, accu[0] # accu是一个list，accu[0]表示top1 accuracy。
     
-    def cuda(self):
-        self.model.cuda()
-        self.t_model.cuda()
+    def cuda(self, device):
+        self.model.to(device)
+        self.t_model.to(device)
     
     def cpu(self):
         self.model.cpu()
@@ -514,9 +515,9 @@ class create_sflmococlient_instance(create_base_instance):
         for online, target in zip(self.model.parameters(), self.t_model.parameters()):
             target.data = tau * target.data + (1 - tau) * online.data
     
-    def cuda(self):
-        self.model.cuda()
-        self.t_model.cuda()
+    def cuda(self, device):
+        self.model.to(device)
+        self.t_model.to(device)
     
     def cpu(self):
         self.model.cpu()

@@ -39,6 +39,7 @@ def get_sfl_args():
     parser.add_argument('--resume', action='store_true', default=False, help="resume from checkpoint")
     parser.add_argument('--data_size', type=int, default=32, help="dimension size of input data")
     parser.add_argument('--avg_freq', type=int, default=1, help="frequency to perform fedavg per round")
+    parser.add_argument('--device', type=str, default='cuda:0', help="gpu_device")
 
     # Split Learning Setting (Basic)
     parser.add_argument('--num_client', type=int, default=1, help="client的数量")

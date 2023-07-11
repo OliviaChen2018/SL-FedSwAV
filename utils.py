@@ -5,6 +5,7 @@ import copy
 import sys
 from PIL import ImageFilter
 import random
+import torchvision
 from torchvision.utils import make_grid
 # import matplotlib.pyplot as plt
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
@@ -90,6 +91,93 @@ class DatasetSplit(torch.utils.data.Dataset):
     def __getitem__(self, item):
         images, labels = self.dataset[self.idxs[item]]
         return images, labels
+    
+def partition_data(training_data, labels, num_client, shuffle, num_workers, batch_size, num_class, partition = 'noniid', beta=0.4): 
+     #参数num_client表示client的数量
+    if num_client == 1:
+        training_loader_list = [torch.utils.data.DataLoader(training_data,  batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)]
+
+    elif num_client > 1:
+        training_loader_list = []
+        if partition == "homo" or partition == "iid":
+            idxs = np.random.permutation(N)   #在训练集的条数范围内生成随机序列
+            batch_idxs = np.array_split(idxs, num_client)
+            net_dataidx_map = {i: batch_idxs[i] for i in range(num_client)}
+
+        elif partition == "noniid-labeldir" or partition == "noniid":
+            min_size = 0 
+            min_require_size = 10   # 每个client至少要有10条数据
+            K = num_class
+                # min_require_size = 100
+
+            N = labels.shape[0]
+            net_dataidx_map = {}  #用于存放每个client拥有的样本的idx数组
+
+            #min_size表示所有client中样本数量最少的client对应的样本数量。如果存在某个client的样本数量没达到min_require_size，则继续为client分配样本。
+            while min_size < min_require_size:
+                idx_batch = [[] for _ in range(num_client)]  # idx_batch存放num_client个client对应的样本idx
+                for k in range(K): #遍历所有类别，将每个类别按Dirichlet分布的比例分配给各个client。
+                    idx_k = np.where(labels == k)[0]  #idx_k表示训练集中label为k的所有样本的idx集合
+                    np.random.shuffle(idx_k) #上面选出来的idx是按顺序的，现在把顺序打乱。
+                    proportions = np.random.dirichlet(np.repeat(beta, num_client)) 
+                    #proportions的长度为num_client
+                    proportions = np.array([p * (len(idx_j) < N / num_client) for p, idx_j in zip(proportions, idx_batch)])  # 取出第j个client拥有的所有sample下标和第j个client的idx
+                    proportions = proportions / proportions.sum() #将剩下的client的划分比例重新归一化
+                    proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1] #
+                    idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, proportions))]  #为第j个client分配类别k的样本
+                    min_size = min([len(idx_j) for idx_j in idx_batch]) #min_size表示所有client中样本数量最少的client对应的样本数量
+                    # if K == 2 and num_client <= 10:
+                    #     if np.min(proportions) < 200:
+                    #         min_size = 0
+                    #         break
+
+            
+            for j in range(num_client):
+                #分配完之后，由于idx_batch中的样本idx是按类别顺序存放的，所以要打乱。
+                np.random.shuffle(idx_batch[j]) 
+                net_dataidx_map[j] = idx_batch[j] # 用net_dataidx_map记录每个client拥有的样本。
+                # 封装为dataloader
+                training_subset = torch.utils.data.Subset(training_data, idx_batch[j])
+                if num_workers > 0:
+                    subset_training_loader = torch.utils.data.DataLoader(training_subset,
+                                                                         shuffle=shuffle, 
+                                                                         num_workers=num_workers,
+                                                                         batch_size=batch_size, 
+                                                                         persistent_workers = True)
+                else:
+                    subset_training_loader = torch.utils.data.DataLoader(training_subset, 
+                                                                         shuffle=shuffle, 
+                                                                         num_workers=num_workers, 
+                                                                         batch_size=batch_size, 
+                                                                         persistent_workers = False)
+                training_loader_list.append(subset_training_loader)
+#     print(net_dataidx_map)
+    #traindata_cls_counts：数据分布情况（每个client拥有的所有类别及其数量）
+    traindata_cls_counts = record_net_data_stats(labels, net_dataidx_map) 
+
+    return training_loader_list, traindata_cls_counts
+
+def record_net_data_stats(y_train, net_dataidx_map):
+    '''用于记录每个client的数据分布(拥有的所有样本类别，及该类别出现的次数)'''
+    net_cls_counts = {}
+
+    for net_i, dataidx in net_dataidx_map.items(): # dict.items()返回(key, value)元组组成的列表
+    # net_i表示第i个client, dataidx为其拥有的样本idx
+        unq, unq_cnt = np.unique(y_train[dataidx], return_counts=True) #返回unique的类别数组
+        tmp = {unq[i]: unq_cnt[i] for i in range(len(unq))} # 字典,存放第i个client拥有的类别及其数量
+        net_cls_counts[net_i] = tmp #字典，存放所有client的类别信息
+
+    data_list=[]
+    for net_id, data in net_cls_counts.items(): # net_id表示client编号，data表示该client拥有的类别的次数信息
+        n_total=0
+        for class_id, n_data in data.items(): # class_id表示类别编号，n_data表示该类别在该client中的出现次数
+            n_total += n_data  # 计算该client拥有的数据条数
+        data_list.append(n_total) #data_list保存每个client拥有的数据条数
+    print('mean:', np.mean(data_list)) #打印每个client的平均数据条数和方差，以显示异质程度
+    print('std:', np.std(data_list))
+
+    return net_cls_counts
+
 
 def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_workers, batch_size, noniid_ratio = 1.0, num_class = 10, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2"):
     #mearning of default hetero_string = "C_D|B" - dividing clients into two groups, stronger group: C clients has D of the data (batch size = B); weaker group: the other (1-C) clients have (1-D) of the data (batch size = 1).
@@ -346,6 +434,29 @@ def noniid_alllabel(dataset, num_users, noniid_ratio = 0.2, num_class = 10, hete
         dict_users_labeled[i] = set(dict_users_labeled[i])
 
     return dict_users_labeled
+
+class CustomSubset(Subset):
+    '''A custom subset class'''
+    def __init__(self, dataset, indices):
+        super().__init__(dataset, indices)
+#         self.targets = dataset.targets # 保留targets属性
+#         self.classes = dataset.classes # 保留classes属性
+        
+        if torchvision.__version__ == '0.2.1':
+            self.target = dataset.train_labels
+#             data, self.target = train_data.train_data, np.array(train_data.train_labels) 
+            #torchvision.datasets.CIFAR10官方类自己会处理train_data或test_data。
+        else:
+#             data = train_data.data
+            self.targets = dataset.targets
+        # data表示数据集中的所有样本值，target表示样本标签。
+
+    def __getitem__(self, idx): #同时支持索引访问操作
+        x, y = self.dataset[self.indices[idx]]      
+        return x, y 
+
+    def __len__(self): # 同时支持取长度操作
+        return len(self.indices)
 
 
 

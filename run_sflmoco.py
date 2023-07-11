@@ -24,16 +24,16 @@ set_deterministic(args.seed)
 '''Preparing'''
 #get data
 create_dataset = getattr(datasets, f"get_{args.dataset}")
-train_loader, mem_loader, test_loader = create_dataset(batch_size=args.batch_size,
-                                                       num_workers=args.num_workers, 
-                                                       shuffle=True, 
-                                                       num_client = args.num_client, 
-                                                       data_proportion = args.data_proportion, 
-                                                       noniid_ratio = args.noniid_ratio, 
-                                                       augmentation_option = True, 
-                                                       pairloader_option = args.pairloader_option, 
-                                                       hetero = args.hetero, 
-                                                       hetero_string = args.hetero_string)
+train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(batch_size=args.batch_size,
+               num_workers=args.num_workers, 
+               shuffle=True, 
+               num_client = args.num_client, 
+               data_proportion = args.data_proportion, 
+               noniid_ratio = args.noniid_ratio, 
+               augmentation_option = True, 
+               pairloader_option = args.pairloader_option, 
+               hetero = args.hetero, 
+               hetero_string = args.hetero_string)
 # datasets.py
 # train_loader ==  get_cifar10_pairloader （train_loader作为对比学习的训练集）
 # mem_loader == get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
@@ -41,7 +41,7 @@ train_loader, mem_loader, test_loader = create_dataset(batch_size=args.batch_siz
 # test_loader == get_cifar10_testloader(128, num_workers, False, path_to_data)
 # （test_loader 中的数据用于最终的线性分类测试和半监督测试）
 
-num_batch = len(train_loader[0])
+num_batch = len(train_loader[0]) # 将第0个client拥有数据的数量作为server-side model的训练epoch数。（即整个模型训练arg.num_epoch轮，每轮中server-side model训练num_batch个batch。每个batch中所有client计算自己数据的表征并将表征在server端聚合）
 
 # resnet, vgg, MobileNetV2分别是./models/中的三个model文件。
 # e.g. args.arch== 'ResNet18'，
@@ -87,7 +87,7 @@ global_model.merge_classifier_cloud() # 给模型加上mlp层（global_model的�
 # 用于训练的整个线性层包括了MLP层
 
 #get loss function
-criterion = nn.CrossEntropyLoss().cuda()
+criterion = nn.CrossEntropyLoss().to(args.device)
 
 #initialize sfl
 sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args)
@@ -99,18 +99,22 @@ if args.initialze_path != "None":
     args.attack = True
 
 if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
-    sfl.cuda() # sfl加载到cuda是什么意思？
+#     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
+    sfl.cuda(args.device)
 else:
     sfl.cpu()
-sfl.s_instance.cuda()
+sfl.s_instance.cuda(args.device)
 
 '''ResSFL training''' 
 if args.enable_ressfl: # 这一部分暂时没用
     sfl.log(f"Enable ResSFL fine-tuning: arch-{args.MIA_arch}-alpha-{args.ressfl_alpha}-ssim-{args.ressfl_target_ssim}")
     ressfl = MIA_simulator(sfl.model, args, args.MIA_arch)
-    ressfl.cuda()
+#     ressfl.cuda()
+    ressfl.cuda(args.device)
     args.attack = True
 
+sfl.log(f'Data statistics: {str(traindata_cls_counts)}')
+    
 '''Training'''
 if not args.resume: # 模型从头训练(而不是resume from checkpoint)
     sfl.log(f"SFL-Moco-microbatch (Moco-{args.moco_version}, Hetero: {args.hetero}, Sample_Ratio: {args.client_sample_ratio}) Train on {args.dataset} with cutlayer {args.cutlayer} and {args.num_client} clients with {args.noniid_ratio}-data-distribution: total epochs: {args.num_epoch}, total number of batches for each client is {num_batch}")
@@ -161,8 +165,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                     #获得第client_id个client的train_data，即augmented images正例对的两个batch
 
                     if args.cutlayer > 1:
-                        query = query.cuda()
-                        pkey = pkey.cuda()
+                        query = query.to(args.device)
+                        pkey = pkey.to(args.device)
                     hidden_query = sfl.c_instance_list[client_id](query)# pass to online  
                     #是不是应该.detach()啊？client的forward函数的返回值已经做了detach了。
                     # 使用client-side部分对aug1进行表征
@@ -184,8 +188,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 stack_hidden_query = torch.load(f"replay_tensors/stack_hidden_query_{shuffle_map[batch]}.pt")
                 stack_hidden_pkey = torch.load(f"replay_tensors/stack_hidden_pkey_{shuffle_map[batch]}.pt")
             
-            stack_hidden_query = stack_hidden_query.cuda()
-            stack_hidden_pkey = stack_hidden_pkey.cuda()
+            stack_hidden_query = stack_hidden_query.to(args.device)
+            stack_hidden_pkey = stack_hidden_pkey.to(args.device)
 
             sfl.s_optimizer.zero_grad()
             #server compute

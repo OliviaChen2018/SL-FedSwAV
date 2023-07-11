@@ -20,6 +20,7 @@ class base_simulator:
             model.merge_classifier_cloud()
         model_log_file = args.output_dir + '/output.log'
         self.logger = setup_logger('default_logger', model_log_file, level=logging.DEBUG)
+        self.device = args.device
         self.model = model # model是整个模型，会在sfl_simulator类中将该模型划分为client-side model和server-side model。
         self.criterion = criterion
         self.num_client = args.num_client
@@ -159,12 +160,12 @@ class base_simulator:
         if self.s_instance is not None:
             self.s_instance.eval()
     
-    def cuda(self): # 将所有model的加载到cuda
+    def cuda(self, device): # 将所有model的加载到cuda
         if self.c_instance_list: 
             for i in range(self.num_client):
-                self.c_instance_list[i].cuda()
+                self.c_instance_list[i].cuda(device)
         if self.s_instance is not None:
-            self.s_instance.cuda()
+            self.s_instance.cuda(device)
 
     def cpu(self): # 将所有model的加载到cpu
         if self.c_instance_list: 
@@ -180,14 +181,14 @@ class base_simulator:
         top1 = AverageMeter()
         self.eval()  # set to eval mode
         if self.c_instance_list:
-            self.c_instance_list[0].cuda()
+            self.c_instance_list[0].cuda(self.device)
         if self.s_instance is not None:
-            self.s_instance.cuda()
+            self.s_instance.to(self.device)
         
         if self.c_instance_list:
             for input, target in self.validate_loader:
-                input = input.cuda()
-                target = target.cuda()
+                input = input.to(self.device)
+                target = target.to(self.device)
                 with torch.no_grad():
                     output = self.c_instance_list[0](input) # local model计算得到表征
                     if self.s_instance is not None:
@@ -256,8 +257,8 @@ class create_base_instance: # 创建一个model实体, 该实体包含设置两�
     def eval(self):
         self.model.eval()
     
-    def cuda(self):
-        self.model.cuda()
+    def cuda(self, device):
+        self.model.to(device)
     
     def cpu(self):
         self.model.cpu()

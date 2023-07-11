@@ -9,7 +9,7 @@ moco_version=V2
 arch=ResNet18
 
 non_iid_list="1.0"
-cutlayer_list="1"
+cutlayer_list="2"
 num_client_list="10"
 dataset=cifar10
 loss_threshold=0.0
@@ -17,6 +17,7 @@ ressfl_alpha=0.0
 bottleneck_option=None
 batch_size=16
 avg_freq=10
+device='cuda:0'
 for num_client in $num_client_list; do
         for noniid_ratio in $non_iid_list; do
                 for cutlayer in $cutlayer_list; do
@@ -25,7 +26,7 @@ for num_client in $num_client_list; do
                                 --noniid_ratio ${noniid_ratio} --output_dir ${output_dir}\
                                 --moco_version ${moco_version} --arch ${arch} --dataset ${dataset} --loss_threshold ${loss_threshold}\
                                 --ressfl_alpha ${ressfl_alpha} --bottleneck_option ${bottleneck_option} --batch_size ${batch_size}\
-                                --avg_freq ${avg_freq}
+                                --avg_freq ${avg_freq} --device ${device}
                 done
         done
 done
