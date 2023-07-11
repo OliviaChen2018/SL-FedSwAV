@@ -157,13 +157,13 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 hidden_query_list = [None for _ in range(len(pool))] 
                 # 用于存放每个client的所有hidden_query
                 hidden_pkey_list = [None for _ in range(len(pool))]
-                # query_num = [None for _ in range(len(pool))] (我加的，用于统计每个client有几条数据)
+                query_num = [0 for _ in range(len(pool))] #(我加的，用于统计每个client有几条数据)
 
                 #client forward
                 for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
                     query, pkey = sfl.next_data_batch(client_id) 
                     #获得第client_id个client的train_data，即augmented images正例对的两个batch
-
+                    query_num[i] = query.size(0)
                     if args.cutlayer > 1:
                         query = query.to(args.device)
                         pkey = pkey.to(args.device)
@@ -212,18 +212,25 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 
                 # 如果使用Dirichlet分布划分client数据，则需要在query计算的时候记录client有几条数据，以便于这里gradient的分配。
 
+                # 将梯度返回给各client
                 if not args.hetero:
                     for j in range(len(pool)):
                         gradient_dict[j] = gradient[j*args.batch_size:(j+1)*args.batch_size, :]
+                        
                 else:
-                    start_grad_idx = 0
+#                     start_grad_idx = 0
+                    query_index = query_num.cumsum(dim=0)
                     for j in range(len(pool)):
-                        if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
-                            gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
-                            start_grad_idx += rich_clients_batch_size
+                        if j==0:
+                            gradient_dict[j] = gradient[0:query_index[j]]
                         else:
-                            gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
-                            start_grad_idx += args.batch_size
+                            gradient_dict[j] = gradient[query_index[j-1]:query_index[j]]
+#                         if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
+#                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
+#                             start_grad_idx += rich_clients_batch_size
+#                         else:
+#                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
+#                             start_grad_idx += args.batch_size
                 
                 if args.enable_ressfl:
                     for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
