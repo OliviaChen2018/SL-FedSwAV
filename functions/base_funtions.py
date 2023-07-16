@@ -50,9 +50,10 @@ class base_simulator:
                 # train_loader[client_id].persistent_workers = True #TODO: remove if hurts
                 self.client_iterator_list.append(create_iterator(iter((train_loader[client_id]))))
     
+    # MocoSFL
     def next_data_batch(self, client_id): # 获取client_id的train_loader中下一个batch的数据
-        # 这里为什么要用iter()这么复杂的方式，而不直接用for循环？因为模型需要所有client同时遍历自己的数据，从而产生representation用于cut_layer的聚合，用for循环太复杂了。
-        try:
+        # 这里为什么要用iter()这么复杂的方式，而不直接用for循环？因为模型需要所有client同时遍历自己的数据，从而产生representation用于cut_layer的聚合，用for循环太复杂了。并且，每个client的batch都需要循环遍历，因此一定要使用iter()才能实现。
+        try: 
             images, labels = next(self.client_iterator_list[client_id])
             if images.size(0) != self.batch_size:
                 try: # 一定要写try-except，因为next的指针移到最后一个元素的下一位时会报错
@@ -64,10 +65,29 @@ class base_simulator:
                 # self.client_iterator_list[client_id] = iter((self.client_dataloader[client_id]))感觉也可以？
                 # self.client_dataloader== train_loader ==  get_cifar10_pairloader
                 images, labels = next(self.client_iterator_list[client_id])
-        except StopIteration:
+        except StopIteration: # 如果已经取完了，就从头开始取。
             self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
             images, labels = next(self.client_iterator_list[client_id])
         return images, labels #由于遍历的是pairloader，所以images和labels为正例对两个augmented images。
+    
+    # FedSwav
+    def next_swavdata_batch(self, client_id):
+        try: 
+            images = next(self.client_iterator_list[client_id]) # images是个list，其中包含2+6个crops
+            if images[0].size(0) != self.batch_size:
+                try: # 一定要写try-except，因为next的指针移到最后一个元素的下一位时会报错
+                    next(self.client_iterator_list[client_id])
+                except StopIteration:
+                    pass
+                self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
+                # create_iterator函数好像很多余，直接
+                # self.client_iterator_list[client_id] = iter((self.client_dataloader[client_id]))感觉也可以？
+                # self.client_dataloader== train_loader ==  get_cifar10_pairloader
+                images = next(self.client_iterator_list[client_id])
+        except StopIteration: # 如果已经取完了，就从头开始取。
+            self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
+            images = next(self.client_iterator_list[client_id])
+        return images 
 
     # 对所有model取.zero_grad()
     def optimizer_zero_grads(self):  # This needs to be called

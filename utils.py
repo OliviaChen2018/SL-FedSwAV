@@ -95,7 +95,7 @@ class DatasetSplit(torch.utils.data.Dataset):
 def partition_data(training_data, labels, num_client, shuffle, num_workers, batch_size, num_class, partition = 'noniid', beta=0.4): 
      #参数num_client表示client的数量
     if num_client == 1:
-        training_loader_list = [torch.utils.data.DataLoader(training_data,  batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)]
+        training_loader_list = [torch.utils.data.DataLoader(training_data,  batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)]
 
     elif num_client > 1:
         training_loader_list = []
@@ -143,13 +143,15 @@ def partition_data(training_data, labels, num_client, shuffle, num_workers, batc
                                                                          shuffle=shuffle, 
                                                                          num_workers=num_workers,
                                                                          batch_size=batch_size, 
-                                                                         persistent_workers = True)
+                                                                         persistent_workers = True,
+                                                                         pin_memory=True)
                 else:
                     subset_training_loader = torch.utils.data.DataLoader(training_subset, 
                                                                          shuffle=shuffle, 
                                                                          num_workers=num_workers, 
                                                                          batch_size=batch_size, 
-                                                                         persistent_workers = False)
+                                                                         persistent_workers = False,
+                                                                         pin_memory=True)
                 training_loader_list.append(subset_training_loader)
 #     print(net_dataidx_map)
     #traindata_cls_counts：数据分布情况（每个client拥有的所有类别及其数量）

@@ -320,20 +320,28 @@ class create_sflmocoserver_instance(create_base_instance):
 
         self.K = args.K #max number of keys stored in queue，即queue的最大容量
         self.T = args.T #Temperature of InfoCE loss
+        
+        self.use_the_queue = False #用于表示当前的分配过程是否使用队列
 
         self.feature_sharing = feature_sharing
         if self.feature_sharing:
-            self.queue = torch.randn(args.K_dim, self.K).to(self.device) #K_dim: key中向量的维度
+#             self.queue = torch.randn(len(args.crops_for_assign), args.K_dim, self.K).to(self.device) #K_dim: key中向量的维度
             #队列的初值为随机值（这个队列是横着的，每个feature是竖着的）
-            self.queue = nn.functional.normalize(self.queue, dim=0) # 对队列中的每个列向量标准化
-            self.queue_ptr = torch.zeros(1, dtype=torch.long) #queue_ptr表示队列的指针，初值为[0]
+#             self.queue = nn.functional.normalize(self.queue, dim=1) # 对队列中的每个列向量标准化
+            self.queue = torch.zeros(len(args.crops_for_assign), args.K_dim, self.K).to(self.device) 
+            self.queue_ptr = torch.zeros(2, dtype=torch.long) #queue_ptr表示队列的指针，初值为[0]
         else: # 如果不进行特征聚合共享，则每个client都维护一个自己的队列
             self.K = self.K // self.num_client #将总队列容量均匀分给每个client的队列
-            self.queue = []
-            self.queue_ptr = []
+#             self.queue = []
+#             self.queue_ptr = []
+            self.queue = [[] for _ in len(args.crops_for_assign)]
+            self.queue_ptr = [[] for _ in len(args.crops_for_assign)]
             for _ in range(self.num_client):
-                self.queue.append(torch.randn(args.K_dim, self.K).to(self.device)) # queue中包含了若干个子队列
-                self.queue_ptr.append(torch.zeros(1, dtype=torch.long))
+#                 self.queue.append(torch.randn(args.K_dim, self.K).to(self.device)) # queue中包含了若干个子队列
+#                 self.queue_ptr.append(torch.zeros(1, dtype=torch.long))
+                 for i in range(args.crops_for_assign):
+                    self.queue[i].append(torch.zeros(args.K_dim, self.K).to(self.device)) 
+                    self.queue_ptr[i].append(torch.zeros(1, dtype=torch.long))
                 
     def __call__(self, input):
         return self.forward(input)
@@ -342,6 +350,28 @@ class create_sflmocoserver_instance(create_base_instance):
         output = self.model(input)
         return output
 
+    
+    @torch.no_grad()
+    def _dequeue_and_enqueue_swav(self, keys, crop_index, pool = None):
+        # 参数crop_index表示当前传入的是哪类(0,1)增强样本
+        # gather keys before updating queue
+        if self.feature_sharing: # feature_sharing这个参数默认为True
+            batch_size = keys.shape[0]
+            ptr = int(self.queue_ptr[crop_index])
+            
+            # replace the keys at ptr (dequeue and enqueue)（左边队首，右边队尾）
+            if (ptr + batch_size) <= self.K: # 指针没超过queue的最大容量，则将keys的转置加在队尾
+#                 self.queue[:, ptr:ptr + batch_size] = keys.T
+                self.queue[crop_index, :, ptr:ptr + batch_size] = keys.T
+            else: #队列已满
+                self.queue[crop_index, :, ptr:] = keys.T[:, :self.K - ptr] 
+                # 队列中还有self.K-ptr个空位置，则只放keys中的前self.K-ptr个features入队
+                self.queue[crop_index, :, 0:(batch_size + ptr - self.K)] = keys.T[:, self.K - ptr:]
+                # 按先进先出原则，将队首的self.K-ptr个位置用于存放keys中剩下的features(循环队列的结构)
+            ptr = (ptr + batch_size) % self.K  # move pointer，指针指到当前队尾(即keys中最后一个feature所在的位置)
+
+            self.queue_ptr[crop_index][0] = ptr # 保存指针位置(queue_ptr中只有一个元素)
+            
 
     @torch.no_grad()
     def _dequeue_and_enqueue(self, keys, pool = None):
@@ -401,6 +431,31 @@ class create_sflmocoserver_instance(create_base_instance):
     def _batch_unshuffle_single_gpu(self, x, idx_unshuffle):
         """Undo batch shuffle.  还原batch的顺序。"""
         return x[idx_unshuffle]
+    
+    @torch.no_grad()
+    def distributed_sinkhorn(out):
+        Q = torch.exp(out / args.epsilon).t() # Q is K-by-B for consistency with notations from our paper
+        B = Q.shape[1] * args.world_size # number of samples to assign
+        K = Q.shape[0] # how many prototypes
+
+        # make the matrix sums to 1
+        sum_Q = torch.sum(Q)
+        dist.all_reduce(sum_Q)
+        Q /= sum_Q
+
+        for it in range(args.sinkhorn_iterations):
+            # normalize each row: total weight per prototype must be 1/K
+            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            dist.all_reduce(sum_of_rows)
+            Q /= sum_of_rows
+            Q /= K
+
+            # normalize each column: total weight per sample must be 1/B
+            Q /= torch.sum(Q, dim=0, keepdim=True)
+            Q /= B
+
+        Q *= B # the colomns must sum to 1 so that Q is an assignment
+        return Q.t()
 
 
     def contrastive_loss(self, query, pkey, pool = None): 
@@ -450,39 +505,93 @@ class create_sflmocoserver_instance(create_base_instance):
         #这里的acc不是图片预测的acc，而是计算正例对的logits比负例对logits大的acc，记为contrast acc.
 
         return loss, accu, query_out, pkey_out
+    
+    
+#     def compute(self, query, pkey, update_momentum = True, enqueue = True, tau = 0.99, pool = None):
+#         # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
+#         query.requires_grad=True # 为什么需要修改.requires_grad参数？因为传入的query是经过.detach()的，requires_grad=False，需要修改为True，并以query为叶子节点构建新的计算图。
 
-    def compute(self, query, pkey, update_momentum = True, enqueue = True, tau = 0.99, pool = None):
-        # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
-        query.requires_grad=True # 为什么需要修改.requires_grad参数？因为传入的query是经过.detach()的，requires_grad=False，需要修改为True，并以query为叶子节点构建新的计算图。
+#         query.retain_grad() #.retain_grad()的目的是保留query的梯度信息。为什么要保留？在梯度计算图中反向传播计算完梯度之后，只有叶子节点的梯度信息会被保留，而非叶子节点的梯度信息会被清空，以节省空间。在SL中query的梯度信息需要被用于client端网络的反向传播，而query虽然在逻辑上是叶子节点，但实际上是一个中间节点，因此需要额外设置以保留。
 
-        query.retain_grad() #.retain_grad()的目的是保留query的梯度信息。为什么要保留？在梯度计算图中反向传播计算完梯度之后，只有叶子节点的梯度信息会被保留，而非叶子节点的梯度信息会被清空，以节省空间。在SL中query的梯度信息需要被用于client端网络的反向传播，而query虽然在逻辑上是叶子节点，但实际上是一个中间节点，因此需要额外设置以保留。
+#         if update_momentum:
+#             self.update_moving_average(tau)
 
-        if update_momentum:
-            self.update_moving_average(tau)
+#         if self.symmetric: # 使用互信息计算
+#             loss12, accu, q1, k2 = self.contrastive_loss(query, pkey, pool)
+#             loss21, accu, q2, k1 = self.contrastive_loss(pkey, query, pool)
+#             loss = loss12 + loss21
+#             pkey_out = torch.cat([k1, k2], dim = 0) # 将同一张图片的两个aug的keys都入队作为负例
+#         else:
+#             loss, accu, query_out, pkey_out = self.contrastive_loss(query, pkey, pool)
 
-        if self.symmetric: # 使用互信息计算
-            loss12, accu, q1, k2 = self.contrastive_loss(query, pkey, pool)
-            loss21, accu, q2, k1 = self.contrastive_loss(pkey, query, pool)
-            loss = loss12 + loss21
-            pkey_out = torch.cat([k1, k2], dim = 0) # 将同一张图片的两个aug的keys都入队作为负例
-        else:
-            loss, accu, query_out, pkey_out = self.contrastive_loss(query, pkey, pool)
+#         if enqueue:
+#             self._dequeue_and_enqueue(pkey_out, pool) # 使用当前batch的keys更新队列
 
-        if enqueue:
-            self._dequeue_and_enqueue(pkey_out, pool) # 使用当前batch的keys更新队列
+#         error = loss.detach().cpu().numpy() # error变量用于记录loss的数值
 
-        error = loss.detach().cpu().numpy() # error变量用于记录loss的数值
-
-        if query.grad is not None:
-            query.grad.zero_() # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在server端先将query的梯度清零，
+#         if query.grad is not None:
+#             query.grad.zero_() # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在server端先将query的梯度清零，
         
-        # loss.backward(retain_graph = True)
-        loss.backward()
+#         # loss.backward(retain_graph = True)
+#         loss.backward()
 
-        gradient = query.grad.detach().clone() # get gradient, the -1 is important, since updates are added to the weights in cpp.
+#         gradient = query.grad.detach().clone() # get gradient, the -1 is important, since updates are added to the weights in cpp.
+#         # 为什么要保存query的梯度信息？因为需要传回client端网络，使各client端网络使用query的梯度信息对自己的网络进行更新。
+
+#         return error, gradient, accu[0] # accu是一个list，accu[0]表示top1 accuracy。
+
+    def compute_swav(self, hidden_embedding_list, scores_list, enqueue = True, pool = None):
+        # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
+        # normalize the prototypes
+        with torch.no_grad():
+            w = self.model.prototypes.weight.data.clone()
+            w = nn.functional.normalize(w, dim=1, p=2)
+            self.model.prototypes.weight.copy_(w)
+            
+        loss = [0 for _ in range(len(pool))]
+        error = [0 for _ in range(len(pool))]
+        gradient = {i:[] for _ in range(len(pool))}
+        query_list = {i:[] for i in range(len(pool))}
+        total_loss = 0
+        # ============ swav loss ... ============
+        for client_index, client_id in enumerate(pool):
+#             loss = 0
+            bs = hidden_embedding_list[client_index][0].size(0)
+            for i, crop_id in enumerate(args.crops_for_assign):
+                query = hidden_embedding_list[client_index][crop_id*bs : (crop_id+1)*bs]
+                query.requires_grad=True
+                query.retain_grad()
+                with torch.no_grad():
+                    out = scores[client_index][bs * crop_id: bs * (crop_id + 1)].detach()
+                    if self.use_the_queue or not torch.all(self.queue[i, :, -1]==0):
+                        self.use_the_queue=True
+                        out = torch.cat((torch.mm(queue[i].t(), self.model.prototypes.weight.t()), out))
+                        self._dequeue_and_enqueue_swav(query, pool) # 使用当前batch的keys更新队列
+                    
+                    q = distributed_sinkhorn(out)[-bs:]
+                
+                subloss = 0
+                for v in np.delete(np.arange(np.sum(args.nmb_crops)), crop_id):
+                    x = scores[client_index][bs * v: bs * (v + 1)] / args.temperature
+                    subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(x, dim=1), dim=1))
+                loss[client_index] = loss[client_index] + subloss / (np.sum(args.nmb_crops) - 1)
+                loss[client_index] = loss[client_index] /len(args.crops_for_assign)
+                
+                if query.grad is not None:
+                    query.grad.zero_() # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在server端先将query的梯度清零，
+                query_list[i].append(query.clone())
+                total_loss = total_loss + loss[i]
+
+        error = total_loss.detach().cpu().numpy() # error变量用于记录loss的数值
+
+        total_loss.backward()
+        
+        for i, _ in enumerate(pool):
+            for crops_index in range(args.crops_for_assign):
+                gradient[i].append(query_list[i][crops_index].grad.detach().clone()) # get gradient, the -1 is important, since updates are added to the weights in cpp.
         # 为什么要保存query的梯度信息？因为需要传回client端网络，使各client端网络使用query的梯度信息对自己的网络进行更新。
 
-        return error, gradient, accu[0] # accu是一个list，accu[0]表示top1 accuracy。
+        return error, gradient
     
     def cuda(self, device):
         self.model.to(device)
@@ -505,7 +614,7 @@ class create_sflmococlient_instance(create_base_instance):
 
     def forward(self, input): # return a detached one.
         self.output = self.model(input) # 计算input的表征
-        self.update_moving_average()
+#         self.update_moving_average()
         return self.output.detach()
 
     def backward(self, external_grad):

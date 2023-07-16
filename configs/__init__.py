@@ -59,6 +59,7 @@ def get_sfl_args():
     parser.add_argument('--data_proportion', type=float, default=1.0, help="Use subset of iid data")
     parser.add_argument('--client_sample_ratio', type=float, default=1.0, help="client_sample_ratio, sample a subset of clients")
     parser.add_argument('--hetero', action='store_true', default=False, help="if heterogeneous")
+    parser.add_argument('--partition',type=str, default="non-iid", help="non-iid, iid")
     parser.add_argument('--hetero_string', type=str, default="0.2_0.8|16|0.8_0.2", help="string, followed in format of A_B|C|D_E, only valid if heterogeneous")
     parser.add_argument('--bottleneck_option', type=str, default="None", help="string, followed in format of A_B|C|D_E, only valid if heterogeneous")
     parser.add_argument('--MIA_arch', type=str, default="custom", help="simulated MIA architecture, the more complex, the better quality")
@@ -85,6 +86,36 @@ def get_sfl_args():
     parser.add_argument('--aug_plus', action='store_true', default=False, help="apply extra augmentation (Gaussian Blur))")
     parser.add_argument('--cos', action='store_true', default=False, help="use cosannealing LR scheduler")
     parser.add_argument('--CLR_option', type=str, default="multistep", help="set a client LR scheduling option, no need to mannually set, binding with args.moco_version")
+    
+    # SwAV setting
+    #### data parameters ####
+    parser.add_argument("--nmb_crops", type=int, default=[2], nargs="+",
+                    help="list of number of crops (example: [2, 6])")
+    parser.add_argument("--size_crops", type=int, default=[224], nargs="+",
+                    help="crops resolutions (example: [224, 96])")
+    parser.add_argument("--min_scale_crops", type=float, default=[0.14], nargs="+",
+                    help="argument in RandomResizedCrop (example: [0.14, 0.05])")
+    parser.add_argument("--max_scale_crops", type=float, default=[1], nargs="+",
+                    help="argument in RandomResizedCrop (example: [1., 0.14])")
+    
+    #### swav specific params ###
+    parser.add_argument("--crops_for_assign", type=int, nargs="+", default=[0, 1],
+                        help="list of crops id used for computing assignments")
+    parser.add_argument("--temperature", default=0.1, type=float,
+                        help="temperature of swav-training loss")
+    parser.add_argument("--epsilon", default=0.05, type=float,
+                        help="regularization parameter for Sinkhorn-Knopp algorithm")
+    parser.add_argument("--sinkhorn_iterations", default=3, type=int,
+                        help="number of iterations in Sinkhorn-Knopp algorithm")
+    parser.add_argument("--feat_dim", default=128, type=int,
+                        help="feature dimension")
+    parser.add_argument("--nmb_prototypes", default=3000, type=int,
+                        help="number of prototypes")
+    parser.add_argument("--queue_length", type=int, default=0,
+                        help="length of the queue (0 for no queue)")
+    parser.add_argument("--epoch_queue_starts", type=int, default=15,
+                        help="from this epoch, we start using a queue")
+    
     args = parser.parse_args()
 
     dataset_name_list = ["cifar10", "cifar100", "imagenet", "svhn", "stl10", "tinyimagenet", "imagenet12"]
@@ -175,14 +206,14 @@ def get_sfl_args():
     if args.client_sample_ratio != 1.0:
         args.num_epoch = args.num_epoch * int(1/args.client_sample_ratio)
 
-    '''Pre-fix hetero strings '''
-    if args.hetero:
-        if args.num_client == 500:
-            args.hetero_string = "0.2_0.8|16|0.8_0.2"
-        elif args.num_client == 200:
-            args.hetero_string = "0.5_0.5|4|0.8_0.2"
-        elif args.num_client == 100:
-            args.hetero_string = "0.2_0.8|16|0.8_0.2"
+#     '''Pre-fix hetero strings '''
+#     if args.hetero:
+#         if args.num_client == 500:
+#             args.hetero_string = "0.2_0.8|16|0.8_0.2"
+#         elif args.num_client == 200:
+#             args.hetero_string = "0.5_0.5|4|0.8_0.2"
+#         elif args.num_client == 100:
+#             args.hetero_string = "0.2_0.8|16|0.8_0.2"
 
     # so that no need to set num_class
     if args.dataset == "cifar10":

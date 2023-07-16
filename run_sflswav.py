@@ -13,7 +13,7 @@ from models import vgg
 from models import mobilenetv2
 from models.resnet import init_weights
 from functions.sflmoco_functions import sflmoco_simulator
-from functions.sfl_functions import client_backward, loss_based_status
+from functions.sfl_functions import client_backward, loss_based_status, client_backward_swav
 from functions.attack_functions import MIA_attacker, MIA_simulator
 import gc
 VERBOSE = False
@@ -154,55 +154,48 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
         
         avg_loss = 0.0
         avg_accu = 0.0
-        avg_gan_train_loss = 0.0
-        avg_gan_eval_loss = 0.0
+#         avg_gan_train_loss = 0.0
+#         avg_gan_eval_loss = 0.0
         for batch in range(num_batch):
             sfl.optimizer_zero_grads()
 
             if loss_status.status == "A" or loss_status.status == "B":
                 # 如果当前状态为A/B级,即两次epoch之间的训练loss相差比较大,则使用更新后的client-side网络重新计算query表征; 否则表示以前的表征已经训练得比较好了,则直接使用上一轮计算得到的query表征.
-                hidden_query_list = [None for _ in range(len(pool))] 
+                hidden_embedding_list = [None for _ in range(len(pool))] 
                 # 用于存放每个client的所有hidden_query
-                hidden_pkey_list = [None for _ in range(len(pool))]
-                query_num = [0 for _ in range(len(pool))] #(我加的，用于统计每个client有几条数据)
+                scores_list = [None for _ in range(len(pool))]
+#                 query_num = [0 for _ in range(len(pool))] #(我加的，用于统计每个client有几条数据)
 
                 #client forward
                 for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
-                    query, pkey = sfl.next_data_batch(client_id) 
-                    #获得第client_id个client的train_data，即augmented images正例对的两个batch
-                    query_num[i] = query.size(0)
+                    images = sfl.next_swavdata_batch(client_id)  # images是个list，其中包含2+6个crops
+                    image_num[i] = images[0].size(0)
                     if args.cutlayer > 1:
-                        query = query.to(args.device)
-                        pkey = pkey.to(args.device)
-                    hidden_query = sfl.c_instance_list[client_id](query)# pass to online  
-                    #是不是应该.detach()啊？client的forward函数的返回值已经做了detach了。
+                        images = images.to(args.device)
+                    embedding, score = sfl.c_instance_list[client_id](images)# pass to online  
+                    #client的forward函数的返回值已经做了detach了。sflswav_functions.py create_sflmococlient_instance类的forward函数。
                     # 使用client-side部分对aug1进行表征
-                    hidden_query_list[i] = hidden_query #将aug1(query)的表征用一个list保存起来
-                    with torch.no_grad():
-                        # pass to target 
-                        hidden_pkey = sfl.c_instance_list[client_id].t_model(pkey).detach()  
-                        # self.t_model = copy.deepcopy(model)
-                        # 在MoCo中，生成key的encoder进行动量更新(而不通过梯度反向传播),因此要使用一个深拷贝的模型，并.detach切断梯度计算链，再计算aug2(key)的表征。
-                    hidden_pkey_list[i] = hidden_pkey # 将aug2(key)的表征用一个list保存起来
-                    # hidden_pkey_list: [tensor, tensor, ...,tensor]，其中tensor.size()==[batch_size, hidden_size, input_size, input_size]
-
-                stack_hidden_query = torch.cat(hidden_query_list, dim = 0) 
-                stack_hidden_pkey = torch.cat(hidden_pkey_list, dim = 0) # 将所有client的表征拼接起来
+                    hidden_embedding_list[i] = embedding #将aug1(query)的表征用一个list保存起来
+                    scores_list[i] = score
+                    
+#                 stack_hidden_query = torch.cat(hidden_query_list, dim = 0)#将所有client的表征拼接起来
                 # stack_hidden_pkey：(num_client*batch_size, hidden_size, input_size, input_size)
 
-                if args.loss_threshold > 0.0:
-                    torch.save(stack_hidden_query, f"replay_tensors/stack_hidden_query_{batch}.pt")
-                    torch.save(stack_hidden_pkey, f"replay_tensors/stack_hidden_pkey_{batch}.pt")
-            else: # 当loss变化比较小，则使用client-side models在上一个epoch中计算得到的表征
-                stack_hidden_query = torch.load(f"replay_tensors/stack_hidden_query_{shuffle_map[batch]}.pt")
-                stack_hidden_pkey = torch.load(f"replay_tensors/stack_hidden_pkey_{shuffle_map[batch]}.pt")
+#                 if args.loss_threshold > 0.0:
+#                     torch.save(stack_hidden_query, f"replay_tensors/stack_hidden_query_{batch}.pt")
+#                     torch.save(stack_hidden_pkey, f"replay_tensors/stack_hidden_pkey_{batch}.pt")
+#             else: # 当loss变化比较小，则使用client-side models在上一个epoch中计算得到的表征
+#                 stack_hidden_query = torch.load(f"replay_tensors/stack_hidden_query_{shuffle_map[batch]}.pt")
+#                 stack_hidden_pkey = torch.load(f"replay_tensors/stack_hidden_pkey_{shuffle_map[batch]}.pt")
             
-            stack_hidden_query = stack_hidden_query.to(args.device)
-            stack_hidden_pkey = stack_hidden_pkey.to(args.device)
+#             stack_hidden_query = stack_hidden_query.to(args.device)
 
             sfl.s_optimizer.zero_grad()
             #server compute
-            loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
+#             loss, gradient, accu = sfl.s_instance.compute(hidden_embedding_list, scores_list, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
+
+            #注意：此时两个list均在cpu中
+            loss, gradient_dict = sfl.s_instance.compute_swav(hidden_embedding_list, scores_list, pool = pool) 
 
             sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
@@ -217,45 +210,9 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 
             if loss_status.status == "A": # loss大于某个阈值的时候才更新client-side models
                 # Initialize clients' queue, to store partial gradients
-                gradient_dict = {key: [] for key in range(len(pool))} # 用于存放每个client的gradient
                 
-                # 如果使用Dirichlet分布划分client数据，则需要在query计算的时候记录client有几条数据，以便于这里gradient的分配。
-
-                # 将梯度返回给各client
-                if not args.hetero:
-                    for j in range(len(pool)):
-                        gradient_dict[j] = gradient[j*args.batch_size:(j+1)*args.batch_size, :]
-                        
-                else:
-#                     start_grad_idx = 0
-                    query_index = torch.tensor(query_num).cumsum(dim=0)
-                    for j in range(len(pool)):
-                        if j==0:
-                            gradient_dict[j] = gradient[0:query_index[j], :]
-                        else:
-                            gradient_dict[j] = gradient[query_index[j-1]:query_index[j], :]
-#                         if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
-#                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
-#                             start_grad_idx += rich_clients_batch_size
-#                         else:
-#                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
-#                             start_grad_idx += args.batch_size
-                
-                if args.enable_ressfl:
-                    for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
-                        # let's use the query to train the AE
-                        gan_train_loss = ressfl.train(client_id, hidden_query, query)
-                        #client attacker-aware training loss
-                        gan_eval_loss, gan_grad = ressfl.regularize_grad(client_id, hidden_query, query)
-
-                        if gan_grad is not None:
-                            gradient_dict[j] += gan_grad
-
-                        avg_gan_train_loss += gan_train_loss
-                        avg_gan_eval_loss += gan_eval_loss
-
                 #client backward
-                client_backward(sfl, pool, gradient_dict) # 各client以自己的gradient进行反向传播
+                client_backward_swav(sfl, pool, gradient_dict, args.crops_for_assign) # 各client以自己的gradient进行反向传播
             else:
                 # (optional) step client scheduler (lower its LR)
                 pass

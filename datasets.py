@@ -8,6 +8,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from utils import GaussianBlur, get_multiclient_trainloader_list, CustomSubset, partition_data
 from PIL import Image
 import os
+from multicropdataset import *
 
 STL10_TRAIN_MEAN = (0.4914, 0.4822, 0.4465)
 STL10_TRAIN_STD = (0.2471, 0.2435, 0.2616)
@@ -50,14 +51,16 @@ def denormalize(x, dataset): # normalize a zero mean, std = 1 to range [0, 1]
     return torch.clamp(tensor, 0, 1).permute(3, 0, 1, 2)
 
 
-def get_cifar10(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale_crops=None, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
     if pairloader_option != "None":
         if data_proportion > 0.0:
             # train_loader用于contrastive fl的训练, 是一个包含所有client train_dataloader的list；
             # test_loader用于validate
             # mem_loader也是一个包含所有client dataloader的list；
 #             train_loader = get_cifar10_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
-            train_loader, traindata_cls_counts = get_cifar10_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data)
+#             train_loader, traindata_cls_counts = get_cifar10_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data)
+            train_loader, traindata_cls_counts = get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, hetero_string, path_to_data)
+    
         else:
             train_loader = None
         mem_loader = get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
@@ -239,7 +242,7 @@ def get_cifar100_pairloader(batch_size=16, num_workers=2, shuffle=True, num_clie
 
 def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition = 'noniid', hetero = False, path_to_data = "./data"):
     class CIFAR10Pair(torchvision.datasets.CIFAR10):
-        """CIFAR10 Dataset.
+        """CIFAR10 Dataset. CIFAR10Pair类返回的是一个Dataset类型的变量
         """
 #         def __init__(self, dataset, indices):
 #             super().__init__(dataset, 
@@ -292,7 +295,8 @@ def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True,
     train_data = CIFAR10Pair(root=path_to_data, 
                              train=True, 
                              transform=train_transform, 
-                             download=True) #train_data中包含若干个img pair元组
+                             download=True) 
+    #train_data是一个Dataset变量，调用getitem函数会得到包含若干个img pair元组
     target = np.array(train_data.targets)
 #     data_portion=0.1
 #     indices = torch.randperm(len(train_data))[:int(len(train_data)* data_portion)]
@@ -302,6 +306,25 @@ def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True,
     
     # data表示数据集中的所有样本值，target表示样本标签。
 #     print(len(train_target))
+    
+    cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4)
+    
+#     cifar10_training_loader = get_multiclient_trainloader_list(train_data, num_client, shuffle, num_workers, batch_size, noniid_ratio, 10, hetero, hetero_string)
+    
+    return cifar10_training_loader, traindata_cls_counts
+
+def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition='non-iid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+    
+    train_data = MultiCropCifar10Dataset(
+        path_to_data, 
+        size_crops,
+        nmb_crops,
+        min_scale_crops,
+        max_scale_crops,
+        train=True, 
+        download=True) 
+    #train_data是一个Dataset变量，调用getitem函数会得到包含若干个img pair元组
+    target = np.array(train_data.targets)
     
     cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4)
     
