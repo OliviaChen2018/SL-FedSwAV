@@ -242,12 +242,26 @@ class conv3x3_gn(nn.Module):
     def forward(self, x):
         out = self.relu(self.bn1(self.conv1(x)))
         return out
+    
+class MultiPrototypes(nn.Module):
+    # 创建多组不同的prototypes
+    def __init__(self, output_dim, nmb_prototypes):
+        super(MultiPrototypes, self).__init__()
+        self.nmb_heads = len(nmb_prototypes)
+        for i, k in enumerate(nmb_prototypes):
+            self.add_module("prototypes" + str(i), nn.Linear(output_dim, k, bias=False))
+
+    def forward(self, x):
+        out = []
+        for i in range(self.nmb_heads):
+            out.append(getattr(self, "prototypes" + str(i))(x))
+        return out
 
 class ResNet(nn.Module):
     '''
     ResNet model 
     '''
-    def __init__(self, feature, expansion = 1, num_client = 1, num_class = 10, input_size = 32):
+    def __init__(self, feature, expansion = 1, num_client = 1, num_class = 10, nmb_prototypes = 0, input_size = 32):
         # feature==(local, cloud)。local包含client-side model的所有层；cloud包含server-side model的所有层，二者均为Sequential对象
         # num_client表示client的数量
         # num_class表示数据集中类别的数量
@@ -266,7 +280,8 @@ class ResNet(nn.Module):
                 self.local_list.append(new_copy)  
 
         self.cloud = feature[1] # 用self.cloud存放server-side model
-        self.classifier = nn.Linear(512*expansion, num_class) # 分类层，用于evaluate。模型在表征层的输出通道数为512*expansion (即每张图片有512*expansion个特征)。
+        self.classifier = nn.Linear(512*expansion, num_class) # 分类层，用于evaluate。模型在表征层的输出通道数为512*expansion (即每张图片有512*expansion个特征)。(这里只是为了定义classifier层，所以这么写，实际上这一层在training和eval阶段各有定义)
+#         self.prototypes = nn.Linear(512*expansion, num_class) # 分类层，用于evaluate。模型在表征层的输出通道数为512*expansion (即每张图片有512*expansion个特征)。
         self.cloud_classifier_merge = False  #cloud_classifier_merge标志为True，表示当前的server-side model已经合并了分类层
         self.original_num_cloud = self.get_num_of_cloud_layer()
 
@@ -274,11 +289,52 @@ class ResNet(nn.Module):
         self.cloud.apply(init_weights) # 初始化server-side model的参数
         self.classifier.apply(init_weights) # 初始化分类层的参数
         self.avg_pool = nn.AdaptiveAvgPool2d((1,1)) # 定义一个平均池化层——自适应均值池化。每个通道的输出变为1×1
+        # prototype layer  (定义prototypes层)
+        self.prototypes = None
+        if isinstance(nmb_prototypes, list):
+            self.prototypes = MultiPrototypes(num_class, nmb_prototypes)
+        elif nmb_prototypes > 0:
+            self.prototypes = nn.Linear(num_class, nmb_prototypes, bias=False)
+        self.prototypes.apply(init_weights) # 初始化分类层的参数
         
+#     # MocoSFL的
+#     def forward(self, x, client_id = 0):
+#         if self.cloud_classifier_merge:
+#             x = self.local_list[client_id](x) #x为第client_id个client的数据，因此使用第client_id个client-side model计算表征。
+#             x = self.cloud(x) #server-side model只能接触到x的表征，而不接触数据本身。
+#         else:
+#             x = self.local_list[client_id](x)
+#             x = self.cloud(x)
+#             # x = F.avg_pool2d(x, 4)
+#             x = self.avg_pool(x)
+#             x = x.view(x.size(0), -1)
+#             x = self.classifier(x)
+#         return x
+    
+    # FedSwAV的
     def forward(self, x, client_id = 0):
         if self.cloud_classifier_merge:
-            x = self.local_list[client_id](x) #x为第client_id个client的数据，因此使用第client_id个client-side model计算表征。
-            x = self.cloud(x) #server-side model只能接触到x的表征，而不接触数据本身。
+            if not isinstance(x, list):
+                x = [x]
+            idx_crops = torch.cumsum(torch.unique_consecutive(
+                torch.tensor([inp.shape[-1] for inp in x]),
+                return_counts=True,
+            )[1], 0)
+            start_idx = 0
+            for end_idx in idx_crops:
+                _out = self.local_list[client_id](torch.cat(x[start_idx: end_idx]).cuda(non_blocking=True)) 
+                if start_idx == 0:
+                    output = _out
+                else:
+                    output = torch.cat((output, _out)) 
+                start_idx = end_idx
+            
+            x = self.cloud(output) #server-side model只能接触到x的表征，而不接触数据本身。
+            
+            x = nn.functional.normalize(x, dim=1, p=2)
+
+            if self.prototypes is not None:  # prototypes将每张图片的特征数量变为nmb_prototypes
+                return x, self.prototypes(x)   #self.prototypes(x)：[B, nmb_prototypes]
         else:
             x = self.local_list[client_id](x)
             x = self.cloud(x)
@@ -287,6 +343,8 @@ class ResNet(nn.Module):
             x = x.view(x.size(0), -1)
             x = self.classifier(x)
         return x
+    
+    
     def __call__(self, x, client_id = 0):
         return self.forward(x, client_id)
 
@@ -497,7 +555,7 @@ def make_layers(block, layer_list, cutting_layer, adds_bottleneck = False, bottl
     # cloud表示server-side model的所有层的Sequential
     return local, cloud  
 
-def ResNet18(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
+def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
     if not group_norm:
         return ResNet(make_layers(BasicBlock, 
                                   [2, 2, 2, 2], 
@@ -509,6 +567,7 @@ def ResNet18(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = Fa
                                   WS = WS), 
                       num_client = num_client, 
                       num_class = num_class, 
+                      nmb_prototypes = nmb_prototypes,
                       input_size = input_size)
     # [2, 2, 2, 2]是ResNet18指定的，ResNet34/50是[3,4,6,3]
     else:
@@ -523,6 +582,7 @@ def ResNet18(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = Fa
                                   WS = WS), 
                       num_client = num_client, 
                       num_class = num_class, 
+                      nmb_prototypes = nmb_prototypes,
                       input_size = input_size)
 
 def ResNet34(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
