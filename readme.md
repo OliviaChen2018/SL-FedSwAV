@@ -13,3 +13,8 @@
 
 2023.7.16
 修改训练方式，将Moco对比loss改为计算SwAV的loss。(尚未完成)
+
+2023.7.19
+1.修改了create_sflmococlient_instance类的forward的实现,以便读取multi-crop数据.
+2.完成了对swav loss计算的修改.
+3.模型开始顺利运行了,但目前训练速度非常慢,打算尝试nvidia.dali对数据增强步骤进行加速.
