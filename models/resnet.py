@@ -257,11 +257,21 @@ class MultiPrototypes(nn.Module):
             out.append(getattr(self, "prototypes" + str(i))(x))
         return out
 
+# class prototypes(nn.Module):
+#     # 创建多组不同的prototypes
+#     def __init__(self, output_dim, nmb_prototypes):
+#         super(prototypes, self).__init__()
+#         self.add_module("prototypes", nn.Linear(output_dim, nmb_prototypes, bias=False))
+
+#     def forward(self, x):
+#         out = self.prototypes(x)
+#         return out
+
 class ResNet(nn.Module):
     '''
     ResNet model 
     '''
-    def __init__(self, feature, expansion = 1, num_client = 1, num_class = 10, nmb_prototypes = 0, input_size = 32):
+    def __init__(self, feature, expansion = 1, num_client = 1, num_class = 10, nmb_prototypes = 0, size_crops = [224], nmb_crops=[2], input_size = 32):
         # feature==(local, cloud)。local包含client-side model的所有层；cloud包含server-side model的所有层，二者均为Sequential对象
         # num_client表示client的数量
         # num_class表示数据集中类别的数量
@@ -269,7 +279,11 @@ class ResNet(nn.Module):
         super(ResNet, self).__init__()
         self.current_client = 0
         self.num_client = num_client
+        self.size_crops = size_crops
+        self.nmb_crops = nmb_crops
         self.expansion = expansion
+#         self.num_class = num_class
+#         self.nmb_prototypes = nmb_prototypes
         self.local_list = []
         for i in range(num_client): # 初始化client-side models，保存到self.local_list中。
             if i == 0:
@@ -289,13 +303,15 @@ class ResNet(nn.Module):
         self.cloud.apply(init_weights) # 初始化server-side model的参数
         self.classifier.apply(init_weights) # 初始化分类层的参数
         self.avg_pool = nn.AdaptiveAvgPool2d((1,1)) # 定义一个平均池化层——自适应均值池化。每个通道的输出变为1×1
-        # prototype layer  (定义prototypes层)
+        
         self.prototypes = None
         if isinstance(nmb_prototypes, list):
             self.prototypes = MultiPrototypes(num_class, nmb_prototypes)
         elif nmb_prototypes > 0:
             self.prototypes = nn.Linear(num_class, nmb_prototypes, bias=False)
+#             self.prototypes = prototypes(self.num_class, self.nmb_prototypes)
         self.prototypes.apply(init_weights) # 初始化分类层的参数
+#         self.add_module("prototypes", self.prototypes)
         
 #     # MocoSFL的
 #     def forward(self, x, client_id = 0):
@@ -314,6 +330,8 @@ class ResNet(nn.Module):
     # FedSwAV的
     def forward(self, x, client_id = 0):
         if self.cloud_classifier_merge:
+            print("------------开始执行前向传播----------")
+            print(f"data的size为：{x.size()}")
             if not isinstance(x, list):
                 x = [x]
             idx_crops = torch.cumsum(torch.unique_consecutive(
@@ -336,6 +354,7 @@ class ResNet(nn.Module):
             if self.prototypes is not None:  # prototypes将每张图片的特征数量变为nmb_prototypes
                 return x, self.prototypes(x)   #self.prototypes(x)：[B, nmb_prototypes]
         else:
+            print("------------model没有classifier---------")
             x = self.local_list[client_id](x)
             x = self.cloud(x)
             # x = F.avg_pool2d(x, 4)
@@ -347,13 +366,18 @@ class ResNet(nn.Module):
     
     def __call__(self, x, client_id = 0):
         return self.forward(x, client_id)
+    
+    def get_prototypes(self):
+        return self.prototypes 
 
     def merge_classifier_cloud(self): # 给server-side model加上分类层，并设置标志为True
         self.cloud_classifier_merge = True
         cloud_list = list(self.cloud.children()) #cloud_list为self.cloud中所有层组成的list
-        cloud_list.append(MobView())  #加一个MobView层(该层的操作是池化，池化后变成[batch_size, channel_size, 1]的矩阵)
+        cloud_list.append(MobView())  #加一个MobView层(该层的操作是池化，池化后变成[batch_size, channel_size, 1]的矩阵。这一步之后表征tensor与图片的size无关。)
         cloud_list.append(self.classifier) # 加上分类层
+        
         self.cloud = nn.Sequential(*cloud_list) # 重新将新的cloud_list变为Sequential
+        
 
     def unmerge_classifier_cloud(self): # 给server-side model去掉分类层，并设置标志为False
         self.cloud_classifier_merge = False
@@ -555,7 +579,7 @@ def make_layers(block, layer_list, cutting_layer, adds_bottleneck = False, bottl
     # cloud表示server-side model的所有层的Sequential
     return local, cloud  
 
-def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
+def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, size_crops = [224], nmb_crops = [2], adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
     if not group_norm:
         return ResNet(make_layers(BasicBlock, 
                                   [2, 2, 2, 2], 
@@ -567,6 +591,8 @@ def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, 
                                   WS = WS), 
                       num_client = num_client, 
                       num_class = num_class, 
+                      size_crops = size_crops,
+                      nmb_crops = nmb_crops,
                       nmb_prototypes = nmb_prototypes,
                       input_size = input_size)
     # [2, 2, 2, 2]是ResNet18指定的，ResNet34/50是[3,4,6,3]
@@ -582,6 +608,8 @@ def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, 
                                   WS = WS), 
                       num_client = num_client, 
                       num_class = num_class, 
+                      size_crops = size_crops,
+                      nmb_crops = nmb_crops,
                       nmb_prototypes = nmb_prototypes,
                       input_size = input_size)
 

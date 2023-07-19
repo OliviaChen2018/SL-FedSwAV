@@ -87,6 +87,7 @@ class base_simulator:
         except StopIteration: # 如果已经取完了，就从头开始取。
             self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
             images = next(self.client_iterator_list[client_id])
+#         print(f"读取下一批的数据长度为{len(images.size())}")
         return images 
 
     # 对所有model取.zero_grad()

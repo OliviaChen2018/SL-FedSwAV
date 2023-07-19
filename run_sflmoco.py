@@ -234,6 +234,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                             gradient_dict[j] = gradient[0:query_index[j], :]
                         else:
                             gradient_dict[j] = gradient[query_index[j-1]:query_index[j], :]
+#                         gradient_dict[j].size()==[bs, 64, input_size, input_size]
 #                         if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
 #                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
 #                             start_grad_idx += rich_clients_batch_size

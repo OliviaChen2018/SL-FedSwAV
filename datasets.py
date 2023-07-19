@@ -51,16 +51,17 @@ def denormalize(x, dataset): # normalize a zero mean, std = 1 to range [0, 1]
     return torch.clamp(tensor, 0, 1).permute(3, 0, 1, 2)
 
 
-def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale_crops=None, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale_crops=None, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', aug_type = None, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
     if pairloader_option != "None":
         if data_proportion > 0.0:
+            if aug_type == "swav":
+                train_loader, traindata_cls_counts = get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, hetero_string, path_to_data)
+            else:
             # train_loader用于contrastive fl的训练, 是一个包含所有client train_dataloader的list；
             # test_loader用于validate
             # mem_loader也是一个包含所有client dataloader的list；
 #             train_loader = get_cifar10_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
-#             train_loader, traindata_cls_counts = get_cifar10_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data)
-            train_loader, traindata_cls_counts = get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, hetero_string, path_to_data)
-    
+                train_loader, traindata_cls_counts = get_cifar10_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data)
         else:
             train_loader = None
         mem_loader = get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
@@ -314,7 +315,7 @@ def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True,
     return cifar10_training_loader, traindata_cls_counts
 
 def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition='non-iid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
-    
+#     print("MultiCropCifar10Dataset")
     train_data = MultiCropCifar10Dataset(
         path_to_data, 
         size_crops,

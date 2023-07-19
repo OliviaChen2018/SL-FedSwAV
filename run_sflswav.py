@@ -12,10 +12,11 @@ from models import resnet
 from models import vgg
 from models import mobilenetv2
 from models.resnet import init_weights
-from functions.sflmoco_functions import sflmoco_simulator
+from functions.sflswav_functions import sflmoco_simulator
 from functions.sfl_functions import client_backward, loss_based_status, client_backward_swav
 from functions.attack_functions import MIA_attacker, MIA_simulator
 import gc
+import pdb
 VERBOSE = False
 #get default args
 args = get_sfl_args()
@@ -37,6 +38,7 @@ train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
     noniid_ratio = args.noniid_ratio, 
     augmentation_option = True, 
     pairloader_option = args.pairloader_option, 
+    aug_type = args.aug_type,
     hetero = args.hetero, 
     hetero_string = args.hetero_string)
 # datasets.py
@@ -64,10 +66,13 @@ elif "MobileNetV2" in args.arch:
     create_arch =  getattr(mobilenetv2, args.arch)
     output_dim = 1280
 #get model - use a larger classifier, as in Zhuang et al. Divergence-aware paper
+# pdb.set_trace()
 global_model = create_arch(cutting_layer=args.cutlayer, 
                            num_client = args.num_client, 
                            num_class=args.K_dim, 
                            nmb_prototypes = args.nmb_prototypes,
+                           size_crops = args.size_crops,
+                           nmb_crops = args.nmb_crops,
                            group_norm=True, 
                            input_size= args.data_size, 
                            adds_bottleneck=args.adds_bottleneck,
@@ -80,17 +85,20 @@ if args.mlp: # 只有moco V1的mlp是False
         classifier_list = [nn.Linear(output_dim * global_model.expansion, 4096),
                         nn.BatchNorm1d(4096),
                         nn.ReLU(True),
-                        nn.Linear(4096, args.K_dim)]
+                        nn.Linear(4096, args.K_dim)] #resnet的output_dim==512
     elif "V2" in args.moco_version:
         classifier_list = [nn.Linear(output_dim * global_model.expansion, args.K_dim * global_model.expansion),
                         nn.ReLU(True),
                         nn.Linear(args.K_dim * global_model.expansion, args.K_dim)]
+        # K_dim在configs/__init__.py中定义，是随模型的变化设定的。当前程序==1024。
     else:
         raise("Unknown version! Please specify the classifier.")
     
     global_model.classifier = nn.Sequential(*classifier_list)
     global_model.classifier.apply(init_weights)
+# print(f"global_model的层\n{global_model}")
 global_model.merge_classifier_cloud() # 给模型加上mlp层（global_model的结果依然是对Input的表征）
+
 # 用于训练的整个线性层包括了MLP层
 
 #get loss function
@@ -158,25 +166,26 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #         avg_gan_eval_loss = 0.0
         for batch in range(num_batch):
             sfl.optimizer_zero_grads()
-
+            iteration = epoch * num_batch + batch
+            
             if loss_status.status == "A" or loss_status.status == "B":
                 # 如果当前状态为A/B级,即两次epoch之间的训练loss相差比较大,则使用更新后的client-side网络重新计算query表征; 否则表示以前的表征已经训练得比较好了,则直接使用上一轮计算得到的query表征.
-                hidden_embedding_list = [None for _ in range(len(pool))] 
+                client_embedding_list = [None for _ in range(len(pool))] 
                 # 用于存放每个client的所有hidden_query
                 scores_list = [None for _ in range(len(pool))]
-#                 query_num = [0 for _ in range(len(pool))] #(我加的，用于统计每个client有几条数据)
 
                 #client forward
                 for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
                     images = sfl.next_swavdata_batch(client_id)  # images是个list，其中包含2+6个crops
-                    image_num[i] = images[0].size(0)
+#                     print(f"第{epoch}轮第{batch}个batch第{client_id}号client读取数据条数为{len(images)}")
                     if args.cutlayer > 1:
                         images = images.to(args.device)
-                    embedding, score = sfl.c_instance_list[client_id](images)# pass to online  
-                    #client的forward函数的返回值已经做了detach了。sflswav_functions.py create_sflmococlient_instance类的forward函数。
+#                     if batch==1:
+#                         pdb.set_trace()
+                    embedding = sfl.c_instance_list[client_id](images)# (client-side model计算表征)
+                    # embedding是个list，其中包含了len(self.size_crops)==2个tensor，其中第一个tensor包含nmb_crops[0]==2个标准增强样本的表征，第二个tensor包含nmb_crops[1]==6个增强样本的表征
                     # 使用client-side部分对aug1进行表征
-                    hidden_embedding_list[i] = embedding #将aug1(query)的表征用一个list保存起来
-                    scores_list[i] = score
+                    client_embedding_list[i] = embedding 
                     
 #                 stack_hidden_query = torch.cat(hidden_query_list, dim = 0)#将所有client的表征拼接起来
                 # stack_hidden_pkey：(num_client*batch_size, hidden_size, input_size, input_size)
@@ -195,23 +204,37 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #             loss, gradient, accu = sfl.s_instance.compute(hidden_embedding_list, scores_list, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
 
             #注意：此时两个list均在cpu中
-            loss, gradient_dict = sfl.s_instance.compute_swav(hidden_embedding_list, scores_list, pool = pool) 
+            loss, gradient_dict = sfl.s_instance.compute_swav(
+                client_embedding_list, 
+                crops_for_assign = args.crops_for_assign, 
+                nmb_crops = args.nmb_crops, 
+                temperature = args.temperature, 
+                epsilon = args.epsilon, 
+                sinkhorn_iterations = args.sinkhorn_iterations, 
+                pool = pool) 
+            
+            if iteration < args.freeze_prototypes_niters:
+                    for name, p in model.named_parameters():
+                        if "prototypes" in name:
+                            p.grad = None
 
             sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
             if VERBOSE and (batch% 50 == 0 or batch == num_batch - 1):
                 sfl.log(f"epoch {epoch} batch {batch}, loss {loss}")
             avg_loss += loss
-            avg_accu += accu
+#             avg_accu += accu
 
             # distribute gradients to clients
             if args.cutlayer <= 1:
-                gradient = gradient.cpu()
+                for i in range(len(gradient_dict)):
+                    gradient_dict[i] = gradient_dict[i].cpu()
 
             if loss_status.status == "A": # loss大于某个阈值的时候才更新client-side models
                 # Initialize clients' queue, to store partial gradients
                 
                 #client backward
+#                 pdb.set_trace()
                 client_backward_swav(sfl, pool, gradient_dict, args.crops_for_assign) # 各client以自己的gradient进行反向传播
             else:
                 # (optional) step client scheduler (lower its LR)
@@ -231,7 +254,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                     
         sfl.s_scheduler.step()
 
-        avg_accu = avg_accu / num_batch # avg_accu是一个epoch中所有batch的对比acc的batch平均
+#         avg_accu = avg_accu / num_batch # avg_accu是一个epoch中所有batch的对比acc的batch平均
         avg_loss = avg_loss / num_batch # avg_loss是一个epoch中所有batch的对比loss的batch平均
         if args.enable_ressfl:
             avg_gan_train_loss = avg_gan_train_loss / num_batch / len(pool)
@@ -247,6 +270,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             knn_accu_max = knn_val_acc
             sfl.save_model(epoch, is_best = True) # (base_funtions.py)
         epoch_logging_msg = f"epoch:{epoch}, knn_val_accu: {knn_val_acc:.2f}, contrast_loss: {avg_loss:.2f}, contrast_acc: {avg_accu:.2f}" # contrast_acc：正例对的logits比负例对的logits高则正确
+        epoch_logging_msg = f"epoch:{epoch}, knn_val_accu: {knn_val_acc:.2f}, contrast_loss: {avg_loss:.2f}" # contrast_acc：正例对的logits比负例对的logits高则正确
         
         if args.enable_ressfl:
             epoch_logging_msg += f", gan_train_loss: {avg_gan_train_loss:.2f}, gan_eval_loss: {avg_gan_eval_loss:.2f}"

@@ -143,7 +143,7 @@ def client_backward(sfl_simulator, pool, gradient_dict):
 def client_backward_swav(sfl_simulator, pool, gradient_dict, num_crops):
     for i, client_id in enumerate(pool):
         for crops_index in range(len(num_crops)):
-            sfl_simulator.c_instance_list[client_id].backward(gradient_dict[i][crops_index])
+            sfl_simulator.c_instance_list[client_id].backward(gradient_dict[i])
         sfl_simulator.c_optimizer_list[client_id].step()
         sfl_simulator.c_scheduler_list[client_id].step()
 

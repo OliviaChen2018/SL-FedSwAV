@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from models.resnet import init_weights
 from utils import AverageMeter, accuracy
 import numpy as np
+import pdb
 
 
 class sflmoco_simulator(base_simulator):
@@ -340,6 +341,8 @@ class create_sflmocoserver_instance(create_base_instance):
     
     def forward(self, input):
         output = self.model(input)
+        if self.model.prototypes is not None:  # prototypes将每张图片的特征数量变为nmb_prototypes
+            return output, self.model.prototypes(output)   #self.prototypes(x)：[B, nmb_prototypes]
         return output
 
 
@@ -503,9 +506,9 @@ class create_sflmococlient_instance(create_base_instance):
     def __call__(self, input):
         return self.forward(input)
 
-    def forward(self, input): # return a detached one.
+    def forward(self, input): # return a detached one. (这个forward函数只是client-side model的前向传播。self.model==self.)
         self.output = self.model(input) # 计算input的表征
-        self.update_moving_average()
+#         self.update_moving_average()
         return self.output.detach()
 
     def backward(self, external_grad):

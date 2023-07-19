@@ -64,6 +64,7 @@ class MultiCropCifar10Dataset(datasets.CIFAR10):
                 transforms.ToTensor(),
                 transforms.Normalize(mean=mean, std=std)])
             ] * nmb_crops[i])
+#         print(f"增强样本的个数：{len(trans)}")  # expected: 8
         self.trans = trans
 
     def __getitem__(self, index):

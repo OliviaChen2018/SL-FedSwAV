@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from models.resnet import init_weights
 from utils import AverageMeter, accuracy
 import numpy as np
+import pdb
 
 
 class sflmoco_simulator(base_simulator):
@@ -28,7 +29,11 @@ class sflmoco_simulator(base_simulator):
         # Create server instances
         if self.model.cloud is not None:
             # self.s_instance是server-side model
+            print(self.model.prototypes)
+            self.prototypes = self.model.get_prototypes()
+#             print(self.prototypes)
             self.s_instance = create_sflmocoserver_instance(self.model.cloud, 
+                                                            self.prototypes,
                                                             criterion, 
                                                             args, 
                                                             self.model.get_smashed_data_size(1, args.data_size), 
@@ -305,12 +310,13 @@ class sflmoco_simulator(base_simulator):
         return test_acc_1
 
 class create_sflmocoserver_instance(create_base_instance):
-    def __init__(self, model, criterion, args, server_input_size = 1, feature_sharing = True) -> None:
+    def __init__(self, model, prototypes, criterion, args, server_input_size = 1, feature_sharing = True) -> None:
         super().__init__(model)
         self.criterion = criterion
         self.device = args.device
         self.t_model = copy.deepcopy(model) 
         # 这是创建server_instance的类，传入的model是server-side model
+        self.prototypes = prototypes
         self.symmetric = args.symmetric
         self.batch_size = args.batch_size
         self.num_client = args.num_client
@@ -347,7 +353,10 @@ class create_sflmocoserver_instance(create_base_instance):
         return self.forward(input)
     
     def forward(self, input):
+        print("调用server_instance的forward函数")
         output = self.model(input)
+#         if self.prototypes is not None:
+#             return output, self.prototypes(output)
         return output
 
     
@@ -433,20 +442,18 @@ class create_sflmocoserver_instance(create_base_instance):
         return x[idx_unshuffle]
     
     @torch.no_grad()
-    def distributed_sinkhorn(out):
-        Q = torch.exp(out / args.epsilon).t() # Q is K-by-B for consistency with notations from our paper
-        B = Q.shape[1] * args.world_size # number of samples to assign
+    def distributed_sinkhorn(self, out, epsilon, sinkhorn_iterations): # 加了注解@torch.no_grad()的全都是类的内部方法，需要用self.调用
+        Q = torch.exp(out / epsilon).t() # Q is K-by-B for consistency with notations from our paper
+        B = Q.shape[1] # number of samples to assign
         K = Q.shape[0] # how many prototypes
 
         # make the matrix sums to 1
         sum_Q = torch.sum(Q)
-        dist.all_reduce(sum_Q)
         Q /= sum_Q
 
-        for it in range(args.sinkhorn_iterations):
+        for it in range(sinkhorn_iterations):
             # normalize each row: total weight per prototype must be 1/K
             sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
-            dist.all_reduce(sum_of_rows)
             Q /= sum_of_rows
             Q /= K
 
@@ -540,56 +547,82 @@ class create_sflmocoserver_instance(create_base_instance):
 
 #         return error, gradient, accu[0] # accu是一个list，accu[0]表示top1 accuracy。
 
-    def compute_swav(self, hidden_embedding_list, scores_list, enqueue = True, pool = None):
+    def compute_swav(self, client_embedding_list, crops_for_assign, nmb_crops, temperature, epsilon, sinkhorn_iterations, enqueue = True, pool = None):
         # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
         # normalize the prototypes
+#         print(f"server-side prototypes：{self.model}")
         with torch.no_grad():
-            w = self.model.prototypes.weight.data.clone()
+            w = self.prototypes.weight.data.clone()
             w = nn.functional.normalize(w, dim=1, p=2)
-            self.model.prototypes.weight.copy_(w)
+            self.prototypes.weight.copy_(w)
+        self.prototypes.to(self.device)
             
         loss = [0 for _ in range(len(pool))]
-        error = [0 for _ in range(len(pool))]
-        gradient = {i:[] for _ in range(len(pool))}
-        query_list = {i:[] for i in range(len(pool))}
-        total_loss = 0
+        gradient = [None for _ in range(len(pool))]
+        query_list = {i:[] for i in range(len(pool))} #存放每个client的数据经client-side model后的表征
+        
+        scores_list = [None for _ in range(len(pool))]
+        total_loss = 0 # 所有clients的loss之和
         # ============ swav loss ... ============
         for client_index, client_id in enumerate(pool):
-#             loss = 0
-            bs = hidden_embedding_list[client_index][0].size(0)
-            for i, crop_id in enumerate(args.crops_for_assign):
-                query = hidden_embedding_list[client_index][crop_id*bs : (crop_id+1)*bs]
-                query.requires_grad=True
-                query.retain_grad()
+            loss_i = 0 # 第i个client的loss
+#             
+#             print(client_embedding_list[client_index].size())
+#             pdb.set_trace()
+#             print(self.model)
+#             embedding_i, score_i = self.model(client_embedding)
+            query_i = client_embedding_list[client_index]
+            embedding_i = [] # 存放第i个client的2+6个增强样本经过server-side model之后的2个big表征
+#             count_crop = 0
+            for crop_id in range(len(nmb_crops)):
+                query_crop_id = query_i[crop_id].detach() 
+                # query_crop_id是一个tensor，包含若干个相同size的增强样本的表征
+#                 count_crop += self.nmb_crops[crop_id]
+                query_crop_id.requires_grad=True
+                query_crop_id.retain_grad()
+                embedding_crop_id = self.model(query_crop_id.to(self.device, non_blocking=True))
+                # embedding_crop_id表示经过server-side model之后的表征.
+                # embedding_crop_id.size()==[B*(num_crops[crop_id], args.K_dim)]
+                embedding_i.append(embedding_crop_id)
+#                 print(f"第i个client的表征的维数为：{embedding_crop_id.size()}")
+                if query_crop_id.grad is not None:
+                    query_crop_id.grad.zero_() # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在server端先将query的梯度清零
+#                 print(f"第{client_index}的第{crop_id}的query_crop_id的size为：{query_crop_id.size()}")
+                query_list[client_index].append(query_crop_id)
+            
+            bs = int(embedding_i[0].size(0)/nmb_crops[0]) # int里面的计算结果是个float，不能直接用于索引。
+            embedding_i = torch.cat(embedding_i, dim=0) #经过server-side model表征之后size均为1，可以拼接了。最终embedding_i为所有增强样本表征的tensor。[B*sum(num_crops),args.K_dim]
+#             print(f"第i个client的表征的维数为：{embedding_i.size()}")
+            score_i = self.prototypes(embedding_i) #用prototypes层处理，得到所有表征的分类scores。
+            for queue_i, crop_id in enumerate(crops_for_assign):
+                query = embedding_i[crop_id*bs : (crop_id+1)*bs]
+                
                 with torch.no_grad():
-                    out = scores[client_index][bs * crop_id: bs * (crop_id + 1)].detach()
-                    if self.use_the_queue or not torch.all(self.queue[i, :, -1]==0):
+                    out = score_i[bs * crop_id: bs * (crop_id + 1)].detach()
+                    if self.use_the_queue or not torch.all(self.queue[queue_i, :, -1]==0):
                         self.use_the_queue=True
-                        out = torch.cat((torch.mm(queue[i].t(), self.model.prototypes.weight.t()), out))
+                        out = torch.cat((torch.mm(queue[queue_i].t(), self.prototypes.weight.t()), out))
                         self._dequeue_and_enqueue_swav(query, pool) # 使用当前batch的keys更新队列
                     
-                    q = distributed_sinkhorn(out)[-bs:]
+                    q = self.distributed_sinkhorn(out, epsilon, sinkhorn_iterations)[-bs:]
                 
-                subloss = 0
-                for v in np.delete(np.arange(np.sum(args.nmb_crops)), crop_id):
-                    x = scores[client_index][bs * v: bs * (v + 1)] / args.temperature
+                subloss = 0 # 第i个client的第crop_id号样本的loss
+                for v in np.delete(np.arange(np.sum(nmb_crops)), crop_id):
+                    x = score_i[bs * v: bs * (v + 1)] / temperature
                     subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(x, dim=1), dim=1))
-                loss[client_index] = loss[client_index] + subloss / (np.sum(args.nmb_crops) - 1)
-                loss[client_index] = loss[client_index] /len(args.crops_for_assign)
+                loss_i = loss_i + subloss / (np.sum(nmb_crops) - 1)
                 
-                if query.grad is not None:
-                    query.grad.zero_() # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在server端先将query的梯度清零，
-                query_list[i].append(query.clone())
-                total_loss = total_loss + loss[i]
-
+            loss_i = loss_i / len(crops_for_assign) # 默认情况下crops_for_assign==[0,1]
+            loss_i.backward()
+            total_loss += loss_i
+            
+            # 默认情况下crops_for_assign==[0,1]，所以只取第0个query的梯度\
+#             print(query_list[client_index][0])
+            
+            gradient[client_index] = query_list[client_index][0].grad.detach().clone() # get gradient, the -1 is important, since updates are added to the weights in cpp.
+            # query_list[client_index][0].grad.size() == torch.Size([32, 64, 224, 224])
+            
         error = total_loss.detach().cpu().numpy() # error变量用于记录loss的数值
-
-        total_loss.backward()
-        
-        for i, _ in enumerate(pool):
-            for crops_index in range(args.crops_for_assign):
-                gradient[i].append(query_list[i][crops_index].grad.detach().clone()) # get gradient, the -1 is important, since updates are added to the weights in cpp.
-        # 为什么要保存query的梯度信息？因为需要传回client端网络，使各client端网络使用query的梯度信息对自己的网络进行更新。
 
         return error, gradient
     
@@ -604,7 +637,8 @@ class create_sflmocoserver_instance(create_base_instance):
 class create_sflmococlient_instance(create_base_instance):
     def __init__(self, model) -> None:
         super().__init__(model) # 传入的model是client-side model
-        self.output = None
+#         self.output = None
+        self.output = []
         self.t_model = copy.deepcopy(model) 
         for param_t in self.t_model.parameters():
             param_t.requires_grad = False  # not update by gradient
@@ -613,13 +647,37 @@ class create_sflmococlient_instance(create_base_instance):
         return self.forward(input)
 
     def forward(self, input): # return a detached one.
-        self.output = self.model(input) # 计算input的表征
+#         print(f"输入数据list的长度{len(input)}")
+        if self.output is None:
+            self.output = []
+        if not isinstance(input, list):
+            input = [input]
+        idx_crops = torch.cumsum(torch.unique_consecutive(
+            torch.tensor([inp.shape[-1] for inp in input]),
+            return_counts=True,
+        )[1], 0)
+        start_idx = 0
+        for end_idx in idx_crops:
+#             _out = self.model(torch.cat(input[start_idx: end_idx]).cuda(non_blocking=True)) 
+            _out = self.model(torch.cat(input[start_idx: end_idx]))
+            self.output.append(_out)
+#             if start_idx == 0:
+#                 self.output = _out
+#             else:
+#                 self.output = torch.cat((self.output, _out)) 
+#                 # 这里直接拼接会报错。因为不像swav的output是经过了整个model的结果，本实验的当前model只是client-side model，即一个conv_gn，其输出tensor的最后两维依然和size有关，所以无法拼接。
+            start_idx = end_idx
+#         self.output = self.model(input) # 计算input的表征
 #         self.update_moving_average()
-        return self.output.detach()
+
+        # self.output是个list，其中包含了len(self.size_crops)==2个tensor。第一个tensor包含nmb_crops[0]==2个标准增强样本的表征，第二个tensor包含nmb_crops[1]==6个增强样本的表征
+#         return self.output.detach() 
+        return self.output  # .detach()操作放到compute_swav中执行
 
     def backward(self, external_grad):
         if self.output is not None:
-            self.output.backward(gradient=external_grad)
+#             print(f"self.output[0]的size为:{self.output[0].size()}")
+            self.output[0].backward(gradient=external_grad)
             self.output = None
             
     @torch.no_grad()
