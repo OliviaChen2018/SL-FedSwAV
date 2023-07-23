@@ -47,7 +47,10 @@ train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
 # （mem_loader 中的数据在KNN中作为基准样本点，在线性分类中作为训练线性分类层的训练集）
 # test_loader == get_cifar10_testloader(128, num_workers, False, path_to_data)
 # （test_loader 中的数据用于最终的线性分类测试和半监督测试）
-
+# pdb.set_trace()
+# for data in train_loader[0]: 
+#     print(data.size())
+#train_loader里包含的是若干个clients的dataloader. 每个dataloader中包含增强样本数量个tensor,每个tensor的维度为[batch_size, 3, size_crop, size_crop]
 num_batch = len(train_loader[0]) # 将第0个client拥有数据的数量作为server-side model的训练epoch数。（即整个模型训练arg.num_epoch轮，每轮中server-side model训练num_batch个batch。每个batch中所有client计算自己数据的表征并将表征在server端聚合）
 
 # resnet, vgg, MobileNetV2分别是./models/中的三个model文件。

@@ -2,18 +2,22 @@ from nvidia.dali.plugin.pytorch import DALIGenericIterator
 import pdb
 
 class DALIDataloader(DALIGenericIterator):
-    def __init__(self, pipeline, size, batch_size, output_map=["data", "label"], auto_reset=True, onehot_label=False):
+    def __init__(self, pipeline, batch_size, size, output_map=["data", "label"], auto_reset=True, onehot_label=False):
+#     def __init__(self, pipeline, size, batch_size, output_map=["data", "label"], auto_reset=True, onehot_label=False):
+#         pdb.set_trace()
         super(DALIDataloader, self).__init__(pipelines=pipeline, size=size, auto_reset=auto_reset, output_map=output_map)
+#         super(DALIDataloader, self).__init__(pipelines=pipeline, size=size, auto_reset=auto_reset, output_map=output_map)
 #         self.size = size #这一步赋值不能执行,不知道为什么...
         self.batch_size = batch_size
         self.onehot_label = onehot_label
         self.output_map = output_map #output_map是指定batch中的字典的两个key
         
     def __next__(self):
+#         pdb.set_trace()
         if self._first_batch is not None: # 只有第一个batch走这里
             batch = self._first_batch
             self._first_batch = None
-            pdb.set_trace()
+#             pdb.set_trace()
             return batch[0]  #batch是一个list, list中有一个dict.
         # batch==[{'data': tensor([batch_size, channel_size, input_size, input_size]), 
         #               'labels': tensor([batch_size, 1])}]
@@ -32,5 +36,3 @@ class DALIDataloader(DALIGenericIterator):
             return self._size // self.batch_size
         else:
             return self._size // self.batch_size+1
-        
-        

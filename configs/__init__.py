@@ -97,6 +97,8 @@ def get_sfl_args():
                     help="argument in RandomResizedCrop (example: [0.14, 0.05])")
     parser.add_argument("--max_scale_crops", type=float, default=[1], nargs="+",
                     help="argument in RandomResizedCrop (example: [1., 0.14])")
+    parser.add_argument("--aug_type", type=str, default='swav', 
+                        help="specify multicrop augmentation")
     
     #### swav specific params ###
     parser.add_argument("--crops_for_assign", type=int, nargs="+", default=[0, 1],

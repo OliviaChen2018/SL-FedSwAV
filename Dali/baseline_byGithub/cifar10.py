@@ -45,6 +45,7 @@ class HybridTrainPipe_CIFAR(Pipeline): # 这个pipeline就相当于是在构造�
         output = self.jpegs
         output = self.pad(output.gpu())
         output = self.crop(output, crop_pos_x=self.uniform(), crop_pos_y=self.uniform())
+        print(output.device)
         output = self.cmnp(output, mirror=rng)
         return [output, self.labels]
 

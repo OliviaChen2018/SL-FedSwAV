@@ -9,6 +9,7 @@ from utils import GaussianBlur, get_multiclient_trainloader_list, CustomSubset, 
 from PIL import Image
 import os
 from multicropdataset import *
+import pdb
 
 STL10_TRAIN_MEAN = (0.4914, 0.4822, 0.4465)
 STL10_TRAIN_STD = (0.2471, 0.2435, 0.2616)
@@ -325,6 +326,7 @@ def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops
         train=True, 
         download=True) 
     #train_data是一个Dataset变量，调用getitem函数会得到包含若干个img pair元组
+    pdb.set_trace()
     target = np.array(train_data.targets)
     
     cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4)
