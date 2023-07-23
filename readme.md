@@ -26,4 +26,4 @@
 2023.7.23
 1. 完成了使用dali库对cifar10做non-IID数据划分,以及实现multicrop数据增强的整个流程;
 2. Dali/multicrop_from_dali_baseline文件夹中实现了(load_cifar10_data.py定义了读取cifar10原始数据集的方法load_cifar10(),以及对读取的数据按Dirichlet分布进行划分的方法partition(); Dali_Dataloader.py定义Dataloader类; cifar10_Dali_Dataset.py定义数据集的pipeline, 实现数据增强,并返回整合后的增强样本 )
-3. Dali/baseline_byGithub文件夹中的文件为Github(https://github.com/tanglang96/DataLoaders_DALI/tree/master)上的cifar10数据集的读取baseline (修改了其中的bug).
+3. Dali/baseline_byGithub文件夹中的文件为Github(https://github.com/tanglang96/DataLoaders_DALI/tree/master )上的cifar10数据集的读取baseline (修改了其中的bug).
