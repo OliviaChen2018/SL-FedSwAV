@@ -5,7 +5,7 @@ class DALIDataloader(DALIGenericIterator):
     def __init__(self, pipeline, batch_size, size, output_map=["data", "label"], auto_reset=True, onehot_label=False):
 #     def __init__(self, pipeline, size, batch_size, output_map=["data", "label"], auto_reset=True, onehot_label=False):
 #         pdb.set_trace()
-        super(DALIDataloader, self).__init__(pipelines=pipeline, size=size, auto_reset=auto_reset, output_map=output_map, reader_name='Reader')
+        super(DALIDataloader, self).__init__(pipelines=pipeline, size=size, auto_reset=auto_reset, output_map=output_map)
 #         super(DALIDataloader, self).__init__(pipelines=pipeline, size=size, auto_reset=auto_reset, output_map=output_map)
 #         self.size = size #这一步赋值不能执行,不知道为什么...
         self.batch_size = batch_size

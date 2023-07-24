@@ -1,26 +1,23 @@
 from load_cifar10_data import *
-from cifar_Dali_Dataset import *
+from cifar10_Dali_Dataset import *
 
 CIFAR10_MEAN=[0.49139968 * 255., 0.48215827 * 255., 0.44653124 * 255.]
 CIFAR10_STD=[0.24703233 * 255., 0.24348505 * 255., 0.26158768 * 255.]
-IMG_DIR = '../../data'
+IMG_DIR = '../data'
 CIFAR_IMAGES_NUM_TRAIN = 50000
 TRAIN_BS = 256
 NUM_WORKERS = 4
 CROP_SIZE = 32
 
+image_dir = "../data/"
 batch_size = 256
 NMB_CROPS = [2,6]
 SIZE_CROPS = [224,96]
 MIN_SCALE = [0.14,0.05]
 MAX_SCALE = [1,0.14]
-
-
-train_data, train_targets = load_cifar10(batch_size, train=True, root=IMG_DIR)
-test_data, test_targets = load_cifar10(batch_size, train=False, root=IMG_DIR)
-
-training_data_list, training_label_list, traindata_cls_counts = partition_data(train_data,
-                                                                               train_targets,
+data, targets = load_cifar10(batch_size, train=True, root=image_dir)
+training_data_list, training_label_list, traindata_cls_counts = partition_data(data,
+                                                                               targets,
                                                                                num_client=10,
                                                                                num_class=10, 
                                                                                partition = 'noniid', 

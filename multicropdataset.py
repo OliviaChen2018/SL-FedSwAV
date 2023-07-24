@@ -148,8 +148,8 @@ class PILRandomGaussianBlur(object):
 
 def get_color_distortion(s=1.0):
     # s is the strength of color distortion.
-    color_jitter = transforms.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s)
-    rnd_color_jitter = transforms.RandomApply([color_jitter], p=0.8)
-    rnd_gray = transforms.RandomGrayscale(p=0.2)
-    color_distort = transforms.Compose([rnd_color_jitter, rnd_gray])
+    color_jitter = transforms.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s) #改变图像的属性：亮度（brightness）、对比度（contrast）、饱和度（saturation）和色调（hue)
+    rnd_color_jitter = transforms.RandomApply([color_jitter], p=0.8) # 以0.8的概率随机执行list[color_jitter]中的变换 (Dali中没有RandomApply这个操作)
+    rnd_gray = transforms.RandomGrayscale(p=0.2) #以0.2的概率进行随机灰度变换
+    color_distort = transforms.Compose([rnd_color_jitter, rnd_gray]) #将颜色变换和灰度变换组合成一组transforms
     return color_distort
