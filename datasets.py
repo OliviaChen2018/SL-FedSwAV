@@ -326,7 +326,7 @@ def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops
         train=True, 
         download=True) 
     #train_data是一个Dataset变量，调用getitem函数会得到包含若干个img pair元组
-    pdb.set_trace()
+#     pdb.set_trace()
     target = np.array(train_data.targets)
     
     cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4)

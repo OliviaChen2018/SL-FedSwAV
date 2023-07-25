@@ -334,6 +334,7 @@ class create_sflmocoserver_instance(create_base_instance):
 #             self.queue = torch.randn(len(args.crops_for_assign), args.K_dim, self.K).to(self.device) #K_dim: key中向量的维度
             #队列的初值为随机值（这个队列是横着的，每个feature是竖着的）
 #             self.queue = nn.functional.normalize(self.queue, dim=1) # 对队列中的每个列向量标准化
+#             pdb.set_trace()
             self.queue = torch.zeros(len(args.crops_for_assign), args.K_dim, self.K).to(self.device) 
             self.queue_ptr = torch.zeros(2, dtype=torch.long) #queue_ptr表示队列的指针，初值为[0]
         else: # 如果不进行特征聚合共享，则每个client都维护一个自己的队列

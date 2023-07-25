@@ -8,6 +8,7 @@ import os
 import sys
 import pickle
 import numpy as np
+import pdb
 
 # CIFAR10_MEAN=[0.49139968 * 255., 0.48215827 * 255., 0.44653124 * 255.]
 # CIFAR10_STD=[0.24703233 * 255., 0.24348505 * 255., 0.26158768 * 255.]
@@ -68,6 +69,7 @@ def partition_data(training_data, labels, num_client, num_class, partition = 'no
     # training_data和labels是numpy数组
     training_data_subset_list = []
     training_label_subset_list = []
+#     pdb.set_trace()
     if partition == "homo" or partition == "iid":
         idxs = np.random.permutation(N)   #在训练集的条数范围内生成随机序列
         batch_idxs = np.array_split(idxs, num_client)
@@ -114,6 +116,7 @@ def partition_data(training_data, labels, num_client, num_class, partition = 'no
             training_label_subset_list.append(training_label_subset)
 #     print(net_dataidx_map)
     #traindata_cls_counts：数据分布情况（每个client拥有的所有类别及其数量）
+    
     traindata_cls_counts = record_net_data_stats(labels, net_dataidx_map) 
 
     return training_data_subset_list, training_label_subset_list, traindata_cls_counts

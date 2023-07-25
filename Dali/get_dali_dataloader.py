@@ -1,6 +1,6 @@
-from load_cifar10_data import load_cifar10, partition_data, record_net_data_stats
-from Dali_Dataloader import DALIDataloader
-from cifar_Dali_Dataset import DaliTrainPipe_CIFAR_multicrop, DaliTrainPipe_CIFAR
+from Dali.load_cifar10_data import load_cifar10, partition_data, record_net_data_stats
+from Dali.Dali_Dataloader import DALIDataloader
+from Dali.cifar_Dali_Dataset import DaliTrainPipe_CIFAR_multicrop, DaliTrainPipe_CIFAR
 import pdb
 
 def get_cifar10_Dali_loader(training_data_list, training_label_list, num_client, batch_size, num_workers = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train = True):
@@ -40,11 +40,11 @@ def get_cifar10_Dali_loader(training_data_list, training_label_list, num_client,
                                                       local_rank=local_rank, 
                                                       cutout=cutout,
                                                       train = train)
-            subset_training_loader = DALIDataloader(pipeline=pip_train, 
+            subset_loader = DALIDataloader(pipeline=pip_train, 
                               size=train_data.shape[0],
                               batch_size=batch_size)  #创建当前client的dataloader
-            training_loader_list.append(subset_training_loader) 
-    return training_loader_list
+            loader_list.append(subset_loader) 
+    return loader_list
 
 
 def get_cifar10_Dali_multicroploader(training_data_list, training_label_list, num_client, batch_size, num_workers = 4, nmb_crops = [2], size_crops=[224], min_scale_crops=[0.14], max_scale_crops=[1], device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train = True):
@@ -79,6 +79,7 @@ def get_cifar10_Dali_multicroploader(training_data_list, training_label_list, nu
             train_data = training_data_list[i] #获取当前client的数据
             train_label = training_label_list[i]
             # 创建数据集pipeline
+#             pdb.set_trace()
             pip_train = DaliTrainPipe_CIFAR_multicrop(train_data,
                                                       train_label,
                                                       batch_size=batch_size, 
@@ -124,15 +125,16 @@ def get_cifar10_dali(size_crops=None, nmb_crops=None, min_scale_crops=None, max_
         if data_proportion <= 0.0:
             train_loader = None
         else: # pairloader也并在这里面一起,与multicrop通过size_crops中的元素的值和个数自动区分
-            train_loade = get_cifar10_Dali_multicroploader(
+#             pdb.set_trace()
+            train_loader = get_cifar10_Dali_multicroploader(
                 training_data_list, training_label_list,
                 num_client, batch_size, num_workers, 
-                size_crops, nmb_crops, min_scale_crops, max_scale_crops, train=True)
+                nmb_crops, size_crops, min_scale_crops, max_scale_crops, train=True)
 #         pdb.set_trace()
         mem_loader = get_cifar10_Dali_loader([train_data], [train_targets], num_client = 1, batch_size=128, num_workers = num_workers, train=False)
         
         test_loader = get_cifar10_Dali_loader([test_data], [test_targets], num_client=1, batch_size=128, num_workers = num_workers, train=False)
-        pdb.set_trace()
+#         pdb.set_trace()
         return train_loader, traindata_cls_counts, mem_loader, test_loader
     
     else: # 不做数据增强

@@ -12,8 +12,8 @@ import cupy as cp
 from sklearn.utils import shuffle
 import pdb
 from torch.utils.data import IterableDataset
-from load_cifar10_data import *
-from Dali_Dataloader import DALIDataloader
+from Dali.load_cifar10_data import *
+from Dali.Dali_Dataloader import DALIDataloader
 import time
 
 CIFAR10_MEAN=[0.49139968 * 255., 0.48215827 * 255., 0.44653124 * 255.]
@@ -64,7 +64,7 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
         self.pad = ops.Paste(device=dali_device, ratio=1.25, fill_value=0)
         self.uniform = ops.random.Uniform(range=(0., 1.))
 #         self.crop = ops.Crop(device=dali_device, crop_h=crop, crop_w=crop)
-        self.cmnp = ops.CropMirrorNormalize(device="gpu",
+        self.cmnp = ops.CropMirrorNormalize(device=dali_device,
                                             dtype=types.FLOAT,
                                             mean=CIFAR10_MEAN,
                                             std=CIFAR10_STD
@@ -99,7 +99,7 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
                                 brightness = sat, saturation = sat, contrast=sat, hue=hue),
                 self.random_grayscale(probability=0.2), 
                 ops.GaussianBlur(device=dali_device, sigma=[1.0, 2.0]),
-                ops.CropMirrorNormalize(device="gpu",
+                ops.CropMirrorNormalize(device=dali_device,
                                             dtype=types.FLOAT,
                                             mean=CIFAR10_MEAN,
                                             std=CIFAR10_STD)])
@@ -138,7 +138,7 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
             else:
                 output1 = fn.reshape(multi_crops[i+1], shape = [3, 1,-1])
                 output = fn.cat(output, output1, axis = 2)
-#         print(len(multi_crops))
+        print(len(multi_crops))
 #         return [*multi_crops, self.labels]
 #         pdb.set_trace()
         return [output, self.labels]

@@ -28,7 +28,7 @@ def get_sfl_args():
     parser.add_argument('--num_class', type=int, default=10, help="number of classes: N")
     parser.add_argument('--num_epoch', type=int, default=200)
     parser.add_argument('--seed', type=int, default=1234)
-    parser.add_argument('--num_workers', type=int, default=0, help="Dataloader的进程数")
+    parser.add_argument('--num_workers', type=int, default=4, help="Dataloader的进程数")
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--data_dir', type=str, default='./data/')
     parser.add_argument('--output_dir', type=str, default='./outputs/')
@@ -40,6 +40,7 @@ def get_sfl_args():
     parser.add_argument('--data_size', type=int, default=32, help="dimension size of input data")
     parser.add_argument('--avg_freq', type=int, default=1, help="frequency to perform fedavg per round")
     parser.add_argument('--device', type=str, default='cuda:0', help="gpu_device")
+    parser.add_argument('--use_dali', action='store_true', default=False, help="if use dali to set up dataloader")
 
     # Split Learning Setting (Basic)
     parser.add_argument('--num_client', type=int, default=1, help="client的数量")
@@ -59,7 +60,7 @@ def get_sfl_args():
     parser.add_argument('--data_proportion', type=float, default=1.0, help="Use subset of iid data")
     parser.add_argument('--client_sample_ratio', type=float, default=1.0, help="client_sample_ratio, sample a subset of clients")
     parser.add_argument('--hetero', action='store_true', default=False, help="if heterogeneous")
-    parser.add_argument('--partition',type=str, default="non-iid", help="non-iid, iid")
+    parser.add_argument('--partition',type=str, default="noniid", help="noniid, iid")
     parser.add_argument('--hetero_string', type=str, default="0.2_0.8|16|0.8_0.2", help="string, followed in format of A_B|C|D_E, only valid if heterogeneous")
     parser.add_argument('--bottleneck_option', type=str, default="None", help="string, followed in format of A_B|C|D_E, only valid if heterogeneous")
     parser.add_argument('--MIA_arch', type=str, default="custom", help="simulated MIA architecture, the more complex, the better quality")
@@ -117,6 +118,10 @@ def get_sfl_args():
                         help="length of the queue (0 for no queue)")
     parser.add_argument("--epoch_queue_starts", type=int, default=15,
                         help="from this epoch, we start using a queue")
+    
+    #### optim parameters ###
+    parser.add_argument("--freeze_prototypes_niters", default=12, type=int,
+                    help="freeze the prototypes during this many iterations from the start(swav==313)")
     
     args = parser.parse_args()
 

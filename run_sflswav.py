@@ -15,6 +15,7 @@ from models.resnet import init_weights
 from functions.sflswav_functions import sflmoco_simulator
 from functions.sfl_functions import client_backward, loss_based_status, client_backward_swav
 from functions.attack_functions import MIA_attacker, MIA_simulator
+from Dali.get_dali_dataloader import get_cifar10_dali
 import gc
 import pdb
 VERBOSE = False
@@ -22,25 +23,37 @@ VERBOSE = False
 args = get_sfl_args()
 set_deterministic(args.seed)
 
+# print(f"print args:\n {args}")
+
 '''Preparing'''
 #get data
-create_dataset = getattr(datasets, f"get_{args.dataset}")
-train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
-    args.size_crops, 
-    args.nmb_crops, 
-    args.min_scale_crops, 
-    args.max_scale_crops, 
-    batch_size=args.batch_size,
-    num_workers=args.num_workers, 
-    shuffle=True, 
-    num_client = args.num_client, 
-    data_proportion = args.data_proportion, 
-    noniid_ratio = args.noniid_ratio, 
-    augmentation_option = True, 
-    pairloader_option = args.pairloader_option, 
-    aug_type = args.aug_type,
-    hetero = args.hetero, 
-    hetero_string = args.hetero_string)
+if args.use_dali is True:
+    train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali(
+        size_crops=args.size_crops, nmb_crops=args.nmb_crops, min_scale_crops=args.min_scale_crops, max_scale_crops=args.max_scale_crops, 
+        batch_size=args.batch_size, num_workers=args.num_workers, num_client = args.num_client, 
+        data_proportion = args.data_proportion, noniid_ratio =args.noniid_ratio, 
+        pairloader_option = args.pairloader_option, 
+        partition = args.partition, partition_beta = 0.4, hetero = args.hetero, 
+        path_to_data = args.data_dir)
+    # 之后遍历train_loader要先把数据的size还原
+else:
+    create_dataset = getattr(datasets, f"get_{args.dataset}")
+    train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
+        args.size_crops, 
+        args.nmb_crops, 
+        args.min_scale_crops, 
+        args.max_scale_crops, 
+        batch_size=args.batch_size,
+        num_workers=args.num_workers, 
+        shuffle=True, 
+        num_client = args.num_client, 
+        data_proportion = args.data_proportion, 
+        noniid_ratio = args.noniid_ratio, 
+        augmentation_option = True, 
+        pairloader_option = args.pairloader_option, 
+        aug_type = args.aug_type,
+        hetero = args.hetero, 
+        hetero_string = args.hetero_string)
 # datasets.py
 # train_loader ==  get_cifar10_pairloader （train_loader作为对比学习的训练集）
 # mem_loader == get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
@@ -179,12 +192,34 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 
                 #client forward
                 for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
-                    images = sfl.next_swavdata_batch(client_id)  # images是个list，其中包含2+6个crops
+                    images = sfl.next_swavdata_batch(client_id, args.use_dali)  # images是个list，其中包含2+6个crops
 #                     print(f"第{epoch}轮第{batch}个batch第{client_id}号client读取数据条数为{len(images)}")
+                    if args.use_dali:
+                        data = images['data']
+#                         images_dict = {i: None for i in range(sum(args.nmb_crops))}
+                        images_list = [None for _ in range(sum(args.nmb_crops))]
+                        ptr = 0
+                        column_add_pre = 0
+                        for crop_id in range(len(args.nmb_crops)): # 0,1
+                            for num_id in range(args.nmb_crops[crop_id]): #NMB_CROPS[0]==2
+                                column_add = column_add_pre+args.size_crops[crop_id] * args.size_crops[crop_id]
+#                                 pdb.set_trace()
+                                image = images['data'][:,:, :, column_add_pre: column_add]
+                #                 pdb.set_trace()
+#                                 print(f"size of images_dict[{ptr}]: {image.size()}")
+                                images_list[ptr] = (image.reshape([args.batch_size, 3, args.size_crops[crop_id], -1])).to('cpu')
+                                column_add_pre = column_add
+                    #             print(f"column_add_pre=:{column_add_pre}")
+                    #             print(f"column_add=:{column_add}")
+#                                 print(f"size of images_list[{ptr}]: {images_list[ptr].size()}")
+                                ptr+=1
+                        images = images_list
+#                     pdb.set_trace()
                     if args.cutlayer > 1:
-                        images = images.to(args.device)
+                        for image_id in range(len(images)):
+                            images[image_id] = images[image_id].to(args.device)
 #                     if batch==1:
-#                         pdb.set_trace()
+#                     pdb.set_trace()
                     embedding = sfl.c_instance_list[client_id](images)# (client-side model计算表征)
                     # embedding是个list，其中包含了len(self.size_crops)==2个tensor，其中第一个tensor包含nmb_crops[0]==2个标准增强样本的表征，第二个tensor包含nmb_crops[1]==6个增强样本的表征
                     # 使用client-side部分对aug1进行表征

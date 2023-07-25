@@ -14,6 +14,8 @@ import torch
 import logging
 from utils import AverageMeter, accuracy, average_weights
 from utils import setup_logger
+import pdb
+
 class base_simulator:
     def __init__(self, model, criterion, train_loader, test_loader, args) -> None:
         if not model.cloud_classifier_merge:
@@ -71,10 +73,16 @@ class base_simulator:
         return images, labels #由于遍历的是pairloader，所以images和labels为正例对两个augmented images。
     
     # FedSwav
-    def next_swavdata_batch(self, client_id):
+    def next_swavdata_batch(self, client_id, use_dali):
         try: 
             images = next(self.client_iterator_list[client_id]) # images是个list，其中包含2+6个crops
-            if images[0].size(0) != self.batch_size:
+#             pdb.set_trace()
+            # 如果是dali读取,则images为包含'label'和'data'的dict
+            if use_dali:
+                bs = images['data'].size(0)
+            else:
+                bs = images[0].size(0)
+            if bs != self.batch_size:
                 try: # 一定要写try-except，因为next的指针移到最后一个元素的下一位时会报错
                     next(self.client_iterator_list[client_id])
                 except StopIteration:
