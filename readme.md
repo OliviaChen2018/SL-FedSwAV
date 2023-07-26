@@ -31,3 +31,6 @@
 1. 新增Dali/get_dali_dataloader.py文件, 使得整个模型的数据增强过程都使用nvidia.dali实现.(最终返回3个dataloader,与torch.utils.Dataloader方式下的返回值一致)
 2. 在run_sflswav.py文件中,新增dali方式下读取数据后的维度处理操作(if args.use_dali部分), 使最终得到的images与torch.utils.Dataloader方式下的结果保持一致.
 3. 下一步打算修改swav方式的核心计算部分, 不再分开对每个client的loss执行反向传播计算梯度,而是将所有client的embedding拼接在一起, 计算多个loss, 但只保存一张梯度计算图, 只执行总loss的反向传播.
+
+2023.7.26
+1. 修改sflswav_functions.py中compute_swav函数对loss的计算方式.
