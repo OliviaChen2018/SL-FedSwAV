@@ -34,3 +34,7 @@
 
 2023.7.26
 1. 修改sflswav_functions.py中compute_swav函数对loss的计算方式.
+
+2023.7.27
+1. 修改sflswav_functions.py中compute_swav函数对loss的计算方式, 以及run_sflswav.py中server端模型s_optimizer的更新策略(由之前的所有client的loss计算完成之后再更新,修改为每个client都对server端模型进行更新)
+2. 修改后的更新方式允许server端和client端模型的学习率保持一致,并且使用一个较大的值. (之前的方式: 每个client的loss计算完成后执行反向传播,但不更新模型. 等所有client得到的梯度汇总之后再一次性更新server端模型, 相当于模拟大batch_size的训练方式. 这种方式导致server端的模型使用lr==0.06这样较大的值更新时,loss会变成nan, 并且最终效果很差.)

@@ -1,6 +1,7 @@
 from Dali.load_cifar10_data import load_cifar10, partition_data, record_net_data_stats
 from Dali.Dali_Dataloader import DALIDataloader
 from Dali.cifar_Dali_Dataset import DaliTrainPipe_CIFAR_multicrop, DaliTrainPipe_CIFAR
+import torch
 import pdb
 
 def get_cifar10_Dali_loader(training_data_list, training_label_list, num_client, batch_size, num_workers = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train = True):
@@ -134,7 +135,7 @@ def get_cifar10_dali(size_crops=None, nmb_crops=None, min_scale_crops=None, max_
         mem_loader = get_cifar10_Dali_loader([train_data], [train_targets], num_client = 1, batch_size=128, num_workers = num_workers, train=False)
         
         test_loader = get_cifar10_Dali_loader([test_data], [test_targets], num_client=1, batch_size=128, num_workers = num_workers, train=False)
-#         pdb.set_trace()
+        
         return train_loader, traindata_cls_counts, mem_loader, test_loader
     
     else: # 不做数据增强
@@ -144,4 +145,5 @@ def get_cifar10_dali(size_crops=None, nmb_crops=None, min_scale_crops=None, max_
             train_loader = None
             
         test_loader = get_cifar10_Dali_testloader([test_data], [test_targets], num_client=1, batch_size = 128, num_workers = num_workers, train=False)
+
         return train_loader, traindata_cls_counts, test_loader

@@ -16,7 +16,7 @@ ressfl_alpha=0.0
 bottleneck_option=None
 batch_size=16
 avg_freq=10
-device='cuda:6'
+device='cuda:7'
 queue_length=3840
 aug_type='swav'
 for num_client in $num_client_list; do

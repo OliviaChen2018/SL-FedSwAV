@@ -4,6 +4,7 @@ import nvidia.dali as dali
 import nvidia.dali.types as types
 import nvidia.dali.fn as fn
 import nvidia.dali.ops as ops
+from nvidia.dali.data_node import DataNode
 import os
 import sys
 import pickle
@@ -141,6 +142,7 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
         print(len(multi_crops))
 #         return [*multi_crops, self.labels]
 #         pdb.set_trace()
+#         output.device = 'cpu'
         return [output, self.labels]
     
     def random_grayscale(self, probability):
@@ -148,6 +150,21 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
         saturate = ops.Cast(dtype=types.FLOAT)(saturate())
         hsv = ops.Hsv(device = "gpu", saturation=saturate)
         return hsv
+    
+    
+# class DataNode1(DataNode):
+#     def __init__(self, name, device="cpu", source=None):
+#         super(DataNode1, self).__init__(name, device, source)
+        
+#     def cpu(self):
+#         from nvidia.dali import _conditionals
+#         if _conditionals.conditionals_enabled():
+#             # Treat it the same way as regular operator would behave
+#             [self_split], _ = _conditionals.apply_conditional_split_to_args([self], {})
+#             transferred_node = DataNode(self_split.name, "cpu", self_split.source)
+#             _conditionals.register_data_nodes(transferred_node, [self])
+#             return transferred_node
+#         return DataNode(self.name, "cpu", self.source)
     
     
 class DaliTrainPipe_CIFAR(Pipeline): # 这个pipeline就相当于是在构造数据集

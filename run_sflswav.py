@@ -189,9 +189,10 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 client_embedding_list = [None for _ in range(len(pool))] 
                 # 用于存放每个client的所有hidden_query
                 scores_list = [None for _ in range(len(pool))]
+                gradient_dict = [None for _ in range(len(pool))]
 
                 #client forward
-                for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
+                for client_index, client_id in enumerate(pool): # if distributed, this can be parallelly done.
                     images = sfl.next_swavdata_batch(client_id, args.use_dali)  # images是个list，其中包含2+6个crops
 #                     print(f"第{epoch}轮第{batch}个batch第{client_id}号client读取数据条数为{len(images)}")
                     if args.use_dali:
@@ -205,7 +206,6 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                                 column_add = column_add_pre+args.size_crops[crop_id] * args.size_crops[crop_id]
 #                                 pdb.set_trace()
                                 image = images['data'][:,:, :, column_add_pre: column_add]
-                #                 pdb.set_trace()
 #                                 print(f"size of images_dict[{ptr}]: {image.size()}")
                                 images_list[ptr] = (image.reshape([args.batch_size, 3, args.size_crops[crop_id], -1])).to('cpu')
                                 column_add_pre = column_add
@@ -222,8 +222,9 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #                     pdb.set_trace()
                     embedding = sfl.c_instance_list[client_id](images)# (client-side model计算表征)
                     # embedding是个list，其中包含了len(self.size_crops)==2个tensor，其中第一个tensor包含nmb_crops[0]==2个标准增强样本的表征，第二个tensor包含nmb_crops[1]==6个增强样本的表征
+                    #.detach操作在sflswav_functions.py-->create_sflmococlient_instance-->forward函数中做过了
                     # 使用client-side部分对aug1进行表征
-                    client_embedding_list[i] = embedding 
+#                     client_embedding_list[client_index] = embedding 
                     
 #                 stack_hidden_query = torch.cat(hidden_query_list, dim = 0)#将所有client的表征拼接起来
                 # stack_hidden_pkey：(num_client*batch_size, hidden_size, input_size, input_size)
@@ -237,36 +238,40 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             
 #             stack_hidden_query = stack_hidden_query.to(args.device)
 
-            sfl.s_optimizer.zero_grad()
-            #server compute
-#             loss, gradient, accu = sfl.s_instance.compute(hidden_embedding_list, scores_list, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
+                    sfl.s_optimizer.zero_grad()
+                    #server compute
+        #             loss, gradient, accu = sfl.s_instance.compute(hidden_embedding_list, scores_list, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
 
-            #注意：此时两个list均在cpu中
-            loss, gradient_dict = sfl.s_instance.compute_swav(
-                client_embedding_list, 
-                crops_for_assign = args.crops_for_assign, 
-                nmb_crops = args.nmb_crops, 
-                temperature = args.temperature, 
-                epsilon = args.epsilon, 
-                sinkhorn_iterations = args.sinkhorn_iterations, 
-                pool = pool) 
-            
-            if iteration < args.freeze_prototypes_niters:
-                    for name, p in model.named_parameters():
-                        if "prototypes" in name:
-                            p.grad = None
+                     #注意：此时两个list均在cpu中
+                    loss, gradient_i= sfl.s_instance.compute_swav(
+                        embedding, 
+                        crops_for_assign = args.crops_for_assign, 
+                        nmb_crops = args.nmb_crops, 
+                        temperature = args.temperature, 
+                        epsilon = args.epsilon, 
+                        sinkhorn_iterations = args.sinkhorn_iterations, 
+                        pool = pool) 
+                
+                    print(f"epoch:{epoch}, batch:{batch}, client:{client_index}, loss:{loss}")
+                    
+#                     if iteration < args.freeze_prototypes_niters:
+#                             for name, p in model.named_parameters():
+#                                 if "prototypes" in name:
+#                                     p.grad = None
 
-            sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
+                    sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
-            if VERBOSE and (batch% 50 == 0 or batch == num_batch - 1):
-                sfl.log(f"epoch {epoch} batch {batch}, loss {loss}")
-            avg_loss += loss
-#             avg_accu += accu
+                    if VERBOSE and (batch % 50 == 0 or batch == num_batch - 1):
+                        sfl.log(f"epoch {epoch} batch {batch}, loss {loss}")
+                    avg_loss += loss
+        #             avg_accu += accu
 
-            # distribute gradients to clients
-            if args.cutlayer <= 1:
-                for i in range(len(gradient_dict)):
-                    gradient_dict[i] = gradient_dict[i].cpu()
+                    # distribute gradients to clients
+
+                    for i in range(len(gradient_dict)):
+                        gradient_dict[i] = gradient_i
+                        if args.cutlayer <= 1:
+                            gradient_dict[i] = gradient_dict[i].cpu()
 
             if loss_status.status == "A": # loss大于某个阈值的时候才更新client-side models
                 # Initialize clients' queue, to store partial gradients
