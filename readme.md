@@ -43,4 +43,5 @@
 1. 修改run_sflswav.py中测试阶段的代码, 增加dali方式下获取dataloader的步骤.
 2. 修改functions/sflswav_functions.py文件中三个eval函数, 增加dali dataloader方式下数据的读取流程.
 3. 修改models/resnet.py中模型的forward函数的bug.(之前改错了)
-4. 新的问题: lr=0.006的时候loss突然就nan了,原因不明.之前都可以正常优化. 现在lr=0.0003可以正常优化, 并且一个epoch之后每个client的loss可以降到7.6.
+4. 新的问题: lr=0.006的时候loss突然就nan了,原因不明.之前都可以正常优化. 
+5. 现在lr=0.0003可以正常优化, 并且一个epoch之后每个client的loss可以降到7.6.
