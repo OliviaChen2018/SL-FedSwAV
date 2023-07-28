@@ -71,7 +71,7 @@ class sflmoco_simulator(base_simulator):
         self.data_size = args.data_size
         self.arch = args.arch
         
-    def linear_eval(self, memloader, num_epochs = 100, lr = 3.0): # Use linear evaluation
+    def linear_eval(self, memloader, num_epochs = 100, lr = 3.0, use_dali=False): # Use linear evaluation
         """
         Run Linear evaluation（linear_eval用于最终的测试）
         """
@@ -114,22 +114,40 @@ class sflmoco_simulator(base_simulator):
         avg_pool = nn.AdaptiveAvgPool2d((1,1))
         # Train the linear layer
         for epoch in range(num_epochs):
-            for input, label in memloader[0]:
-                linear_optimizer.zero_grad()
-                input = input.to(self.device)
-                label = label.to(self.device)
-                with torch.no_grad():
-                    output = self.model.local_list[0](input)
-                    output = self.model.cloud(output)
-                    output = avg_pool(output) #[B, output_dim * self.model.expansion, 1]
-                    output = output.view(output.size(0), -1)  # [B,output_dim * self.model.expansion]
-                output = linear_classifier(output.detach()) # [B,num_classes]
-                # 这里output要detach，因为只训练线性分类层，反向传播只计算分类层的梯度。
-                loss = criterion(output, label)
-                # loss = loss_xent(output, label)
-                loss.backward()
-                linear_optimizer.step()
-                linear_scheduler.step()
+            if use_dali is True:
+                for input in memloader[0]:
+                    data = input['data'].to(self.device)
+                    label = input['label'].t().squeeze().to(self.device)
+                    linear_optimizer.zero_grad()
+                    with torch.no_grad():
+                        output = self.model.local_list[0](data)
+                        output = self.model.cloud(output)
+                        output = avg_pool(output) #[B, output_dim * self.model.expansion, 1]
+                        output = output.view(output.size(0), -1)  # [B,output_dim * self.model.expansion]
+                    output = linear_classifier(output.detach()) # [B,num_classes]
+                    # 这里output要detach，因为只训练线性分类层，反向传播只计算分类层的梯度。
+                    loss = criterion(output, label)
+                    # loss = loss_xent(output, label)
+                    loss.backward()
+                    linear_optimizer.step()
+                    linear_scheduler.step()
+            else:
+                for input, label in memloader[0]:
+                    input = input.to(self.device)
+                    label = label.to(self.device)
+                    linear_optimizer.zero_grad()
+                    with torch.no_grad():
+                        output = self.model.local_list[0](input)
+                        output = self.model.cloud(output)
+                        output = avg_pool(output) #[B, output_dim * self.model.expansion, 1]
+                        output = output.view(output.size(0), -1)  # [B,output_dim * self.model.expansion]
+                    output = linear_classifier(output.detach()) # [B,num_classes]
+                    # 这里output要detach，因为只训练线性分类层，反向传播只计算分类层的梯度。
+                    loss = criterion(output, label)
+                    # loss = loss_xent(output, label)
+                    loss.backward()
+                    linear_optimizer.step()
+                    linear_scheduler.step()
             
             """
             Run validation
@@ -137,18 +155,30 @@ class sflmoco_simulator(base_simulator):
             top1 = AverageMeter()
             
             linear_classifier.eval()
-
-            for input, target in self.validate_loader:
-                input = input.to(self.device)
-                target = target.to(self.device)
-                with torch.no_grad():
-                    output = self.model.local_list[0](input)
-                    output = self.model.cloud(output)
-                    output = avg_pool(output)
-                    output = output.view(output.size(0), -1)
-                    output = linear_classifier(output.detach())
-                prec1 = accuracy(output.data, target)[0]
-                top1.update(prec1.item(), input.size(0)) # 计算目前遍历的所有batch的均值
+            if use_dali is True:
+                for input in self.validate_loader[0]:
+                    data = input['data'].to(self.device)
+                    target = input['label'].t().squeeze().to(self.device)
+                    with torch.no_grad():
+                        output = self.model.local_list[0](data)
+                        output = self.model.cloud(output)
+                        output = avg_pool(output)
+                        output = output.view(output.size(0), -1)
+                        output = linear_classifier(output.detach())
+                    prec1 = accuracy(output.data, target)[0]
+                    top1.update(prec1.item(), data.size(0)) # 计算目前遍历的所有batch的均值
+            else:
+                for input, target in self.validate_loader:
+                    input = input.to(self.device)
+                    target = target.to(self.device)
+                    with torch.no_grad():
+                        output = self.model.local_list[0](input)
+                        output = self.model.cloud(output)
+                        output = avg_pool(output)
+                        output = output.view(output.size(0), -1)
+                        output = linear_classifier(output.detach())
+                    prec1 = accuracy(output.data, target)[0]
+                    top1.update(prec1.item(), input.size(0)) # 计算目前遍历的所有batch的均值
             linear_classifier.train()
             avg_accu = top1.avg
             if avg_accu > best_avg_accu:
@@ -161,13 +191,13 @@ class sflmoco_simulator(base_simulator):
         return best_avg_accu
 
 
-    def semisupervise_eval(self, memloader, num_epochs = 100, lr = 3.0): # Use semi-supervised learning as evaluation
+    def semisupervise_eval(self, memloader, num_epochs = 100, lr = 3.0, use_dali=False): # Use semi-supervised learning as evaluation
         """
         Run Linear evaluation
         """
         self.cuda(self.device)
         self.eval()  #set to eval mode
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss().to(self.device)
 
         self.model.unmerge_classifier_cloud()
 
@@ -190,22 +220,39 @@ class sflmoco_simulator(base_simulator):
         best_avg_accu = 0.0
         # Train the linear layer
         for epoch in range(num_epochs):
-            for input, label in memloader[0]:
-                linear_optimizer.zero_grad()
-                input = input.to(self.device)
-                label = label.to(self.device)
-                with torch.no_grad():
-                    output = self.model.local_list[0](input)
-                    output = self.model.cloud(output)
-                    # output = F.avg_pool2d(output, 4)
-                    output = avg_pool(output)
-                    output = output.view(output.size(0), -1)
-                output = semi_classifier(output.detach())
-                loss = criterion(output, label)
-                # loss = loss_xent(output, label)
-                loss.backward()
-                linear_optimizer.step()
-                linear_scheduler.step()
+            if use_dali is True:
+                for input in memloader[0]:
+                    data = input['data'].to(self.device)
+                    label = input['label'].t().squeeze().to(self.device)
+                    with torch.no_grad():
+                        output = self.model.local_list[0](data)
+                        output = self.model.cloud(output)
+                        # output = F.avg_pool2d(output, 4)
+                        output = avg_pool(output)
+                        output = output.view(output.size(0), -1)
+                    output = semi_classifier(output.detach())
+                    loss = criterion(output, label)
+                    # loss = loss_xent(output, label)
+                    loss.backward()
+                    linear_optimizer.step()
+                    linear_scheduler.step()
+            else:
+                for input, label in memloader[0]:
+                    linear_optimizer.zero_grad()
+                    input = input.to(self.device)
+                    label = label.to(self.device)
+                    with torch.no_grad():
+                        output = self.model.local_list[0](input)
+                        output = self.model.cloud(output)
+                        # output = F.avg_pool2d(output, 4)
+                        output = avg_pool(output)
+                        output = output.view(output.size(0), -1)
+                    output = semi_classifier(output.detach())
+                    loss = criterion(output, label)
+                    # loss = loss_xent(output, label)
+                    loss.backward()
+                    linear_optimizer.step()
+                    linear_scheduler.step()
             
             """
             Run validation
@@ -213,20 +260,34 @@ class sflmoco_simulator(base_simulator):
             top1 = AverageMeter()
             
             semi_classifier.eval()
+            if use_dali is True:
+                for input in self.validate_loader[0]:
+                    data = input['data'].to(self.device)
+                    target = input['label'].t().squeeze().to(self.device)
+                    with torch.no_grad():
+                        output = self.model.local_list[0](data)
+                        output = self.model.cloud(output)
+                        # output = F.avg_pool2d(output, 4)
+                        output = avg_pool(output)
+                        output = output.view(output.size(0), -1)
+                        output = semi_classifier(output.detach())
 
-            for input, target in self.validate_loader:
-                input = input.to(self.device)
-                target = target.to(self.device)
-                with torch.no_grad():
-                    output = self.model.local_list[0](input)
-                    output = self.model.cloud(output)
-                    # output = F.avg_pool2d(output, 4)
-                    output = avg_pool(output)
-                    output = output.view(output.size(0), -1)
-                    output = semi_classifier(output.detach())
+                    prec1 = accuracy(output.data, target)[0]
+                    top1.update(prec1.item(), data.size(0))
+            else:
+                for input, target in self.validate_loader:
+                    input = input.to(self.device)
+                    target = target.to(self.device)
+                    with torch.no_grad():
+                        output = self.model.local_list[0](input)
+                        output = self.model.cloud(output)
+                        # output = F.avg_pool2d(output, 4)
+                        output = avg_pool(output)
+                        output = output.view(output.size(0), -1)
+                        output = semi_classifier(output.detach())
 
-                prec1 = accuracy(output.data, target)[0]
-                top1.update(prec1.item(), input.size(0))
+                    prec1 = accuracy(output.data, target)[0]
+                    top1.update(prec1.item(), input.size(0))
             semi_classifier.train()
             avg_accu = top1.avg
             if avg_accu > best_avg_accu:
@@ -237,22 +298,33 @@ class sflmoco_simulator(base_simulator):
         self.train()  #set back to train mode
         return best_avg_accu
 
-    def knn_eval(self, memloader): # Use linear evaluation memloader作为KNN的已知样本点数据集
+    def knn_eval(self, memloader, use_dali=False): # Use linear evaluation memloader作为KNN的已知样本点数据集
         '''用于每个epoch训练之后的验证'''
         if self.c_instance_list:
             self.c_instance_list[0].cuda(self.device)
         # test using a knn monitor
+        
         def test():
             self.eval() # 将self的所有model设置为eval mode
             classes = self.num_class
             total_top1, total_top5, total_num, feature_bank, feature_labels = 0.0, 0.0, 0, [], []
             with torch.no_grad():
                 # generate feature bank
-                for data, target in memloader[0]: # memloader是一个list，其中的元素才是DataLoader。
-                    feature = self.model(data.to(self.device, non_blocking=True)) # self.model的forward函数默认使用client_id=0，即client-side model使用第0个模型。(resnet.py)
-                    feature = F.normalize(feature, dim=1)
-                    feature_bank.append(feature)
-                    feature_labels.append(target) 
+                if use_dali is True:
+                    for input in memloader[0]: # memloader是一个list，其中的元素才是DataLoader。
+                        data = input['data'].to(self.device, non_blocking=True)
+                        target = input['label'].t().squeeze() #dali读取的labels是二维的, pytorch的dataloader中的label是一维的.
+#                         print(next(self.model.parameters()).device)
+                        feature = self.model(data) # self.model的forward函数默认使用client_id=0，即client-side model使用第0个模型。(resnet.py)
+                        feature = F.normalize(feature, dim=1)
+                        feature_bank.append(feature)
+                        feature_labels.append(target)  
+                else:
+                    for data, target in memloader[0]: # memloader是一个list，其中的元素才是DataLoader。
+                        feature = self.model(data.to(self.device, non_blocking=True)) # self.model的forward函数默认使用client_id=0，即client-side model使用第0个模型。(resnet.py)
+                        feature = F.normalize(feature, dim=1)
+                        feature_bank.append(feature)
+                        feature_labels.append(target) 
                     # target和feature都是tensor([x,x,x])的形式，因此此循环结束时的feature_labels为[tensor([x,x,,...],tensor([x,x,...],...))]的形式。而之后的torch.cat(feature_labels,dim=0)操作会将feature_labels列表中的所有tensor合并为一个tensor，即tensor([x,x,x,...])
                 # [D, N] (做了个转置，方便后面做乘法。每列代表一条数据的表征)
                 feature_bank = torch.cat(feature_bank, dim=0).t().contiguous().to(self.device)
@@ -260,20 +332,35 @@ class sflmoco_simulator(base_simulator):
                 feature_labels = torch.cat(feature_labels, dim=0).contiguous().to(self.device)
                 # feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=feature_bank.device)
                 # loop test data to predict the label by weighted knn search
-                for data, target in self.validate_loader:
-                    data, target = data.to(self.device, non_blocking=True), target.to(self.device, non_blocking=True)
-                    # 这里non_blocking=True使得data和target的加载可以并行进行
-                    feature = self.model(data)
-                    feature = F.normalize(feature, dim=1)
-                    
-                    pred_labels = knn_predict(feature, feature_bank, feature_labels, classes, 200, 0.1)
-                    # 参数200表示找出距离最近的200个已知样本点
-                    # pred_labels为预测的类别结果，其中第0列表示出现次数最多的类别。
+                
+                if use_dali is True:
+                    for input in self.validate_loader[0]: 
+                        data = input['data'].to(self.device, non_blocking=True)
+                        target = input['label'].t().squeeze().to(self.device, non_blocking=True)
+                        feature = self.model(data)
+                        feature = F.normalize(feature, dim=1)
+                        pred_labels = knn_predict(feature, feature_bank, feature_labels, classes, 200, 0.1)
+                        # 参数200表示找出距离最近的200个已知样本点
+                        # pred_labels为预测的类别结果，其中第0列表示出现次数最多的类别。
 
-                    total_num += data.size(0) # total_num计算validate_loader中所有数据的条数
-                    total_top1 += (pred_labels[:, 0] == target).float().sum().item() 
-                    # total_top1计算整个validate_loader中top1_acc正确的个数
-                    # print('KNN Test: Acc@1:{:.2f}%'.format(total_top1 / total_num * 100))
+                        total_num += data.size(0) # total_num计算validate_loader中所有数据的条数
+                        total_top1 += (pred_labels[:, 0] == target).float().sum().item() 
+                        
+                else:
+                    for data, target in self.validate_loader:
+                        data, target = data.to(self.device, non_blocking=True), target.to(self.device, non_blocking=True)
+                        # 这里non_blocking=True使得data和target的加载可以并行进行
+                        feature = self.model(data)
+                        feature = F.normalize(feature, dim=1)
+
+                        pred_labels = knn_predict(feature, feature_bank, feature_labels, classes, 200, 0.1)
+                        # 参数200表示找出距离最近的200个已知样本点
+                        # pred_labels为预测的类别结果，其中第0列表示出现次数最多的类别。
+
+                        total_num += data.size(0) # total_num计算validate_loader中所有数据的条数
+                        total_top1 += (pred_labels[:, 0] == target).float().sum().item() 
+                        # total_top1计算整个validate_loader中top1_acc正确的个数
+                        # print('KNN Test: Acc@1:{:.2f}%'.format(total_top1 / total_num * 100))
 
             return total_top1 / total_num * 100 # 返回top1准确率
 

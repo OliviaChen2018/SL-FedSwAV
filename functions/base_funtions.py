@@ -236,6 +236,7 @@ class base_simulator:
         torch.save(self.model.cloud.state_dict(), self.output_dir + f'/checkpoint_s_{epoch}.tar')
         torch.save(self.model.local_list[0].state_dict(), self.output_dir + f'/checkpoint_c_{epoch}.tar')
         # 只保存第0个client-side model
+        
     
     def load_model(self, is_best=True, epoch=200): # 加载最优模型
         if is_best:

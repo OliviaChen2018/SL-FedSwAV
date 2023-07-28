@@ -20,7 +20,7 @@ import pdb
 
 
 #### 加载cifar10数据集 ####
-def load_cifar10(batch_size, train=True, root='../data'):
+def load_cifar10(train=True, root='../data'):
     '''该函数返回的结果与torchvision.datasets.CIFAR10()函数取self.data和self.targets返回的结果相同'''
     base_folder = 'cifar-10-batches-py'
     train_list = [

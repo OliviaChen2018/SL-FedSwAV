@@ -4,7 +4,7 @@ from Dali.cifar_Dali_Dataset import DaliTrainPipe_CIFAR_multicrop, DaliTrainPipe
 import torch
 import pdb
 
-def get_cifar10_Dali_loader(training_data_list, training_label_list, num_client, batch_size, num_workers = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train = True):
+def get_cifar10_Dali_loader(training_data_list, training_label_list, num_client, batch_size, data_portion = 1.0, num_workers = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train = True):
     '''普通的cifar10的dali读取
     train_loader和test_loader都用这个,以传入的data和targets的不同自动区分.
     返回包含dataloader的list'''
@@ -14,6 +14,10 @@ def get_cifar10_Dali_loader(training_data_list, training_label_list, num_client,
         # 对于mem_loader和test_loader，num_client为默认值1
         train_data = training_data_list[0] #获取当前client的数据
         train_label = training_label_list[0]
+        if data_portion<1.0:
+            indices = torch.randperm(len(train_data))[:int(len(train_data)* data_portion)]
+            train_data = train_data[indices]
+            train_label = train_label[indices]
 #         pdb.set_trace()
         pip_train = DaliTrainPipe_CIFAR(train_data, train_label, 
                                       batch_size=batch_size, 
@@ -104,8 +108,8 @@ def get_cifar10_Dali_multicroploader(training_data_list, training_label_list, nu
     
 def get_cifar10_dali(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale_crops=None, batch_size=16, num_workers=4, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, pairloader_option = "None", partition = 'noniid', partition_beta = 0.4, hetero = False, path_to_data = "../data"):
     # 先读取cifar10数据
-    train_data, train_targets = load_cifar10(batch_size, train=True, root=path_to_data)
-    test_data, test_targets = load_cifar10(batch_size, train=False, root=path_to_data)
+    train_data, train_targets = load_cifar10(train=True, root=path_to_data)
+    test_data, test_targets = load_cifar10(train=False, root=path_to_data)
     training_data_list, training_label_list, traindata_cls_counts = partition_data(train_data,
                                                                                train_targets,
                                                                                num_client=num_client,

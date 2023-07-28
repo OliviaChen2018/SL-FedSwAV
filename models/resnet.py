@@ -12,6 +12,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import pdb
 
 NUM_CHANNEL_GROUP = 4
 
@@ -245,11 +246,11 @@ class conv3x3_gn(nn.Module):
     
 class MultiPrototypes(nn.Module):
     # 创建多组不同的prototypes
-    def __init__(self, output_dim, nmb_prototypes):
+    def __init__(self, output_dim, nmb_prototypes, device):
         super(MultiPrototypes, self).__init__()
         self.nmb_heads = len(nmb_prototypes)
         for i, k in enumerate(nmb_prototypes):
-            self.add_module("prototypes" + str(i), nn.Linear(output_dim, k, bias=False))
+            self.add_module("prototypes" + str(i), nn.Linear(output_dim, k, bias=False).to(device))
 
     def forward(self, x):
         out = []
@@ -271,13 +272,14 @@ class ResNet(nn.Module):
     '''
     ResNet model 
     '''
-    def __init__(self, feature, expansion = 1, num_client = 1, num_class = 10, nmb_prototypes = 0, size_crops = [224], nmb_crops=[2], input_size = 32):
+    def __init__(self, feature, expansion = 1, num_client = 1, num_class = 10, nmb_prototypes = 0, size_crops = [224], nmb_crops=[2], input_size = 32, device = 'cuda:0'):
         # feature==(local, cloud)。local包含client-side model的所有层；cloud包含server-side model的所有层，二者均为Sequential对象
         # num_client表示client的数量
         # num_class表示数据集中类别的数量
         # input_size表示数据集中每张图片的尺寸
         super(ResNet, self).__init__()
         self.current_client = 0
+        self.device = device
         self.num_client = num_client
         self.size_crops = size_crops
         self.nmb_crops = nmb_crops
@@ -306,55 +308,19 @@ class ResNet(nn.Module):
         
         self.prototypes = None
         if isinstance(nmb_prototypes, list):
-            self.prototypes = MultiPrototypes(num_class, nmb_prototypes)
+            self.prototypes = MultiPrototypes(num_class, nmb_prototypes, self.device)
         elif nmb_prototypes > 0:
-            self.prototypes = nn.Linear(num_class, nmb_prototypes, bias=False)
+            self.prototypes = nn.Linear(num_class, nmb_prototypes, bias=False).to(self.device)
 #             self.prototypes = prototypes(self.num_class, self.nmb_prototypes)
         self.prototypes.apply(init_weights) # 初始化分类层的参数
 #         self.add_module("prototypes", self.prototypes)
         
 #     # MocoSFL的
-#     def forward(self, x, client_id = 0):
-#         if self.cloud_classifier_merge:
-#             x = self.local_list[client_id](x) #x为第client_id个client的数据，因此使用第client_id个client-side model计算表征。
-#             x = self.cloud(x) #server-side model只能接触到x的表征，而不接触数据本身。
-#         else:
-#             x = self.local_list[client_id](x)
-#             x = self.cloud(x)
-#             # x = F.avg_pool2d(x, 4)
-#             x = self.avg_pool(x)
-#             x = x.view(x.size(0), -1)
-#             x = self.classifier(x)
-#         return x
-    
-    # FedSwAV的
     def forward(self, x, client_id = 0):
         if self.cloud_classifier_merge:
-            print("------------开始执行前向传播----------")
-            print(f"data的size为：{x.size()}")
-            if not isinstance(x, list):
-                x = [x]
-            idx_crops = torch.cumsum(torch.unique_consecutive(
-                torch.tensor([inp.shape[-1] for inp in x]),
-                return_counts=True,
-            )[1], 0)
-            start_idx = 0
-            for end_idx in idx_crops:
-                _out = self.local_list[client_id](torch.cat(x[start_idx: end_idx]).cuda(non_blocking=True)) 
-                if start_idx == 0:
-                    output = _out
-                else:
-                    output = torch.cat((output, _out)) 
-                start_idx = end_idx
-            
-            x = self.cloud(output) #server-side model只能接触到x的表征，而不接触数据本身。
-            
-            x = nn.functional.normalize(x, dim=1, p=2)
-
-            if self.prototypes is not None:  # prototypes将每张图片的特征数量变为nmb_prototypes
-                return x, self.prototypes(x)   #self.prototypes(x)：[B, nmb_prototypes]
+            x = self.local_list[client_id](x) #x为第client_id个client的数据，因此使用第client_id个client-side model计算表征。
+            x = self.cloud(x) #server-side model只能接触到x的表征，而不接触数据本身。
         else:
-            print("------------model没有classifier---------")
             x = self.local_list[client_id](x)
             x = self.cloud(x)
             # x = F.avg_pool2d(x, 4)
@@ -362,6 +328,41 @@ class ResNet(nn.Module):
             x = x.view(x.size(0), -1)
             x = self.classifier(x)
         return x
+    
+    # FedSwAV的
+#     def forward(self, x, client_id = 0):
+#         if self.cloud_classifier_merge:
+#             print("------------开始执行前向传播----------")
+#             print(f"data的size为：{x.size()}")
+#             if not isinstance(x, list):
+#                 x = [x]
+#             idx_crops = torch.cumsum(torch.unique_consecutive(
+#                 torch.tensor([inp.shape[-1] for inp in x]),
+#                 return_counts=True,
+#             )[1], 0)
+#             start_idx = 0
+#             for end_idx in idx_crops:
+#                 _out = self.local_list[client_id](torch.cat(x[start_idx: end_idx]).to(self.device, non_blocking=True)) 
+#                 if start_idx == 0:
+#                     output = _out
+#                 else:
+#                     output = torch.cat((output, _out)) 
+#                 start_idx = end_idx
+            
+#             x = self.cloud(output) #server-side model只能接触到x的表征，而不接触数据本身。
+            
+#             x = nn.functional.normalize(x, dim=1, p=2)
+#             if self.prototypes is not None:  # prototypes将每张图片的特征数量变为nmb_prototypes
+#                 return x, self.prototypes(x)   #self.prototypes(x)：[B, nmb_prototypes]
+#         else:
+#             print("------------model没有classifier---------")
+#             x = self.local_list[client_id](x)
+#             x = self.cloud(x)
+#             # x = F.avg_pool2d(x, 4)
+#             x = self.avg_pool(x)
+#             x = x.view(x.size(0), -1)
+#             x = self.classifier(x)
+#         return x
     
     
     def __call__(self, x, client_id = 0):
@@ -579,7 +580,7 @@ def make_layers(block, layer_list, cutting_layer, adds_bottleneck = False, bottl
     # cloud表示server-side model的所有层的Sequential
     return local, cloud  
 
-def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, size_crops = [224], nmb_crops = [2], adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
+def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, size_crops = [224], nmb_crops = [2], adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True, device = "cuda:0"):
     if not group_norm:
         return ResNet(make_layers(BasicBlock, 
                                   [2, 2, 2, 2], 
@@ -594,7 +595,8 @@ def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, 
                       size_crops = size_crops,
                       nmb_crops = nmb_crops,
                       nmb_prototypes = nmb_prototypes,
-                      input_size = input_size)
+                      input_size = input_size, 
+                      device = device)
     # [2, 2, 2, 2]是ResNet18指定的，ResNet34/50是[3,4,6,3]
     else:
         return ResNet(make_layers(BasicBlock_gn, 
@@ -611,29 +613,30 @@ def ResNet18(cutting_layer, num_client = 1, num_class = 10, nmb_prototypes = 0, 
                       size_crops = size_crops,
                       nmb_crops = nmb_crops,
                       nmb_prototypes = nmb_prototypes,
-                      input_size = input_size)
+                      input_size = input_size, 
+                      device = device)
 
-def ResNet34(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
+def ResNet34(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True, device = "cuda:0"):
     if not group_norm:
-        return ResNet(make_layers(BasicBlock, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(BasicBlock, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), num_client = num_client, num_class = num_class, input_size = input_size, device = device)
     else:
-        return ResNet(make_layers(BasicBlock_gn, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(BasicBlock_gn, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), num_client = num_client, num_class = num_class, input_size = input_size, device = device)
 
-def ResNet50(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
+def ResNet50(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True, device = "cuda:0"):
     if not group_norm:
-        return ResNet(make_layers(Bottleneck, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(Bottleneck, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size, device = device)
     else:
-        return ResNet(make_layers(Bottleneck_gn, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(Bottleneck_gn, [3, 4, 6, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size, device = device)
 
-def ResNet101(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
+def ResNet101(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True, device = "cuda:0"):
     if not group_norm:
-        return ResNet(make_layers(Bottleneck, [3, 4, 23, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(Bottleneck, [3, 4, 23, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size, device = device)
     else:
-        return ResNet(make_layers(Bottleneck_gn, [3, 4, 23, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(Bottleneck_gn, [3, 4, 23, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size, device = device)
 
-def ResNet152(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True):
+def ResNet152(cutting_layer, num_client = 1, num_class = 10, adds_bottleneck = False, bottleneck_option = "C8S1", batch_norm=True, group_norm = False, input_size = 32, c_residual = True, WS = True, device = "cuda:0"):
     if not group_norm:
-        return ResNet(make_layers(Bottleneck, [3, 8, 36, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(Bottleneck, [3, 8, 36, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size, device = device)
     else:
-        return ResNet(make_layers(Bottleneck_gn, [3, 8, 36, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size)
+        return ResNet(make_layers(Bottleneck_gn, [3, 8, 36, 3], cutting_layer, adds_bottleneck = adds_bottleneck, bottleneck_option = bottleneck_option, group_norm = group_norm, input_size = input_size, residual = c_residual, WS = WS), expansion= 4, num_client = num_client, num_class = num_class, input_size = input_size, device = device)
 

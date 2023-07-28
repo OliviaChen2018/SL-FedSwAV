@@ -15,7 +15,8 @@ from models.resnet import init_weights
 from functions.sflswav_functions import sflmoco_simulator
 from functions.sfl_functions import client_backward, loss_based_status, client_backward_swav
 from functions.attack_functions import MIA_attacker, MIA_simulator
-from Dali.get_dali_dataloader import get_cifar10_dali
+from Dali.get_dali_dataloader import get_cifar10_dali, get_cifar10_Dali_loader
+from Dali.load_cifar10_data import load_cifar10
 import gc
 import pdb
 VERBOSE = False
@@ -27,6 +28,7 @@ set_deterministic(args.seed)
 
 '''Preparing'''
 #get data
+test_data, test_targets = load_cifar10(train=False, root=args.data_dir)
 if args.use_dali is True:
     train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali(
         size_crops=args.size_crops, nmb_crops=args.nmb_crops, min_scale_crops=args.min_scale_crops, max_scale_crops=args.max_scale_crops, 
@@ -94,7 +96,8 @@ global_model = create_arch(cutting_layer=args.cutlayer,
                            adds_bottleneck=args.adds_bottleneck,
                            bottleneck_option=args.bottleneck_option, 
                            c_residual = args.c_residual, 
-                           WS = args.WS)
+                           WS = args.WS,
+                           device = args.device)
 
 if args.mlp: # 只有moco V1的mlp是False
     if args.moco_version == "largeV2": # This one uses a larger classifier, same as in Zhuang et al. Divergence-aware paper
@@ -123,11 +126,11 @@ criterion = nn.CrossEntropyLoss().to(args.device)
 #initialize sfl
 sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args)
 
-'''Initialze with ResSFL resilient model '''  # resilient model是什么？
-if args.initialze_path != "None":
-    sfl.log("Load from resilient model, train with client LR of {}".format(args.c_lr))
-    sfl.load_model_from_path(args.initialze_path, load_client = True, load_server = args.load_server)
-    args.attack = True
+# '''Initialze with ResSFL resilient model '''  # resilient model是什么？
+# if args.initialze_path != "None":
+#     sfl.log("Load from resilient model, train with client LR of {}".format(args.c_lr))
+#     sfl.load_model_from_path(args.initialze_path, load_client = True, load_server = args.load_server)
+#     args.attack = True
 
 if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
 #     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
@@ -136,13 +139,13 @@ else:
     sfl.cpu()
 sfl.s_instance.cuda(args.device)
 
-'''ResSFL training''' 
-if args.enable_ressfl: # 这一部分暂时没用
-    sfl.log(f"Enable ResSFL fine-tuning: arch-{args.MIA_arch}-alpha-{args.ressfl_alpha}-ssim-{args.ressfl_target_ssim}")
-    ressfl = MIA_simulator(sfl.model, args, args.MIA_arch)
+# '''ResSFL training''' 
+# if args.enable_ressfl: # 这一部分暂时没用
+#     sfl.log(f"Enable ResSFL fine-tuning: arch-{args.MIA_arch}-alpha-{args.ressfl_alpha}-ssim-{args.ressfl_target_ssim}")
+#     ressfl = MIA_simulator(sfl.model, args, args.MIA_arch)
 #     ressfl.cuda()
-    ressfl.cuda(args.device)
-    args.attack = True
+#     ressfl.cuda(args.device)
+#     args.attack = True
 
 sfl.log(f'Data statistics: {str(traindata_cls_counts)}')
     
@@ -254,10 +257,10 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 
                     print(f"epoch:{epoch}, batch:{batch}, client:{client_index}, loss:{loss}")
                     
-#                     if iteration < args.freeze_prototypes_niters:
-#                             for name, p in model.named_parameters():
-#                                 if "prototypes" in name:
-#                                     p.grad = None
+                    if iteration < args.freeze_prototypes_niters:
+                            for name, p in model.named_parameters():
+                                if "prototypes" in name:
+                                    p.grad = None
 
                     sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
@@ -305,7 +308,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
         
         loss_status.record_loss(epoch, avg_loss) # 更新loss的状态
         
-        knn_val_acc = sfl.knn_eval(memloader=mem_loader) # 每个epoch计算一次knn_acc。
+        knn_val_acc = sfl.knn_eval(memloader=mem_loader, use_dali = args.use_dali) # 每个epoch计算一次knn_acc。
         # mem_loader被用于KNN分类中的已知类别的样本点集合（是一个DataLoader的list）
         if args.cutlayer <= 1:
             sfl.c_instance_list[0].cpu()
@@ -326,33 +329,45 @@ if args.loss_threshold > 0.0: #如果使用降级策略
 
 
 '''Testing'''
-sfl.load_model() # load model that has the lowest contrastive loss. 
+# sfl.load_model() # load model that has the lowest contrastive loss. 
 # 加载所有epoch中KNN准确率最高的模型，并使用该模型进行下一步的测试。
 # finally, do a thorough evaluation.
-val_acc = sfl.knn_eval(memloader=mem_loader)
+val_acc = sfl.knn_eval(memloader=mem_loader, use_dali = args.use_dali)
 sfl.log(f"final knn evaluation accuracy is {val_acc:.2f}")
 
-create_train_dataset = getattr(datasets, f"get_{args.dataset}_trainloader")
+if args.use_dali is True:
+    eval_loader = get_cifar10_Dali_loader([test_data], [test_targets], 1, 128, 1.0, args.num_workers, train=False)
+    val_acc = sfl.linear_eval(eval_loader, 100, use_dali = args.use_dali)
+    sfl.log(f"final linear-probe evaluation accuracy is {val_acc:.2f}")
 
-# create_train_dataset(128, args.num_workers, False, num_client = 1, data_portion = 1.0, noniid_ratio =1.0, augmentation_option =False)
-# 下面3个eval_loader的区别在于data_portion不同。
-eval_loader = create_train_dataset(128, args.num_workers, False, 1, 1.0, 1.0, False)
-val_acc = sfl.linear_eval(eval_loader, 100)
-sfl.log(f"final linear-probe evaluation accuracy is {val_acc:.2f}")
+    eval_loader = get_cifar10_Dali_loader([test_data], [test_targets], 1, 128, 0.1, args.num_workers, train=False)
+    val_acc = sfl.semisupervise_eval(eval_loader, 100, use_dali = args.use_dali)
+    sfl.log(f"final semi-supervised evaluation accuracy with 10% data is {val_acc:.2f}")
 
-eval_loader = create_train_dataset(128, args.num_workers, False, 1, 0.1, 1.0, False)
-val_acc = sfl.semisupervise_eval(eval_loader, 100)
-sfl.log(f"final semi-supervised evaluation accuracy with 10% data is {val_acc:.2f}")
+    eval_loader = get_cifar10_Dali_loader([test_data], [test_targets], 1, 128, 0.01, args.num_workers, train=False)
+    val_acc = sfl.semisupervise_eval(eval_loader, 100, use_dali = args.use_dali)
+    sfl.log(f"final semi-supervised evaluation accuracy with 1% data is {val_acc:.2f}")
+else:
+    create_train_dataset = getattr(datasets, f"get_{args.dataset}_trainloader")
+    # create_train_dataset(128, args.num_workers, False, num_client = 1, data_portion = 1.0, noniid_ratio =1.0, augmentation_option =False)
+    # 下面3个eval_loader的区别在于data_portion不同。
+    eval_loader = create_train_dataset(128, args.num_workers, False, 1, 1.0, 1.0, False)
+    val_acc = sfl.linear_eval(eval_loader, 100, use_dali = args.use_dali)
+    sfl.log(f"final linear-probe evaluation accuracy is {val_acc:.2f}")
 
-eval_loader = create_train_dataset(128, args.num_workers, False, 1, 0.01, 1.0, False)
-val_acc = sfl.semisupervise_eval(eval_loader, 100)
-sfl.log(f"final semi-supervised evaluation accuracy with 1% data is {val_acc:.2f}")
+    eval_loader = create_train_dataset(128, args.num_workers, False, 1, 0.1, 1.0, False)
+    val_acc = sfl.semisupervise_eval(eval_loader, 100, use_dali = args.use_dali)
+    sfl.log(f"final semi-supervised evaluation accuracy with 10% data is {val_acc:.2f}")
+
+    eval_loader = create_train_dataset(128, args.num_workers, False, 1, 0.01, 1.0, False)
+    val_acc = sfl.semisupervise_eval(eval_loader, 100, use_dali = args.use_dali)
+    sfl.log(f"final semi-supervised evaluation accuracy with 1% data is {val_acc:.2f}")
 
 if args.attack:
     '''Evaluate Privacy'''
     if args.resume:
         sfl.load_model() # load model that has the lowest contrastive loss.
-    val_acc = sfl.knn_eval(memloader=mem_loader)
+    val_acc = sfl.knn_eval(memloader=mem_loader, use_dali=args.use_dali)
     sfl.log(f"final knn evaluation accuracy is {val_acc:.2f}")
     MIA = MIA_attacker(sfl.model, train_loader, args, "res_normN4C64")
     MIA.MIA_attack()
