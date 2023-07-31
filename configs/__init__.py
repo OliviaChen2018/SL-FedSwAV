@@ -41,6 +41,7 @@ def get_sfl_args():
     parser.add_argument('--avg_freq', type=int, default=1, help="frequency to perform fedavg per round")
     parser.add_argument('--device', type=str, default='cuda:0', help="gpu_device")
     parser.add_argument('--use_dali', action='store_true', default=False, help="if use dali to set up dataloader")
+    parser.add_argument('--use_fp16', action='store_true', default=False, help="if use fp16 to accelerate")
 
     # Split Learning Setting (Basic)
     parser.add_argument('--num_client', type=int, default=1, help="client的数量")

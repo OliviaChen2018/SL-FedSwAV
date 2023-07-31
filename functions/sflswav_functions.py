@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from models.resnet import init_weights
 from utils import AverageMeter, accuracy
 import numpy as np
+from torch.cuda.amp import autocast as autocast
 import pdb
 
 
@@ -300,8 +301,8 @@ class sflmoco_simulator(base_simulator):
 
     def knn_eval(self, memloader, use_dali=False): # Use linear evaluation memloader作为KNN的已知样本点数据集
         '''用于每个epoch训练之后的验证'''
-        if self.c_instance_list:
-            self.c_instance_list[0].cuda(self.device)
+#         if self.c_instance_list:
+#             self.c_instance_list[0].cuda(self.device)
         # test using a knn monitor
         
         def test():
@@ -443,6 +444,8 @@ class create_sflmocoserver_instance(create_base_instance):
     def forward(self, input):
         print("调用server_instance的forward函数")
         output = self.model(input)
+        pdb.set_trace()
+        output = nn.functional.normalize(output, dim=1, p=2)
 #         if self.prototypes is not None:
 #             return output, self.prototypes(output)
         return output
@@ -748,7 +751,75 @@ class create_sflmocoserver_instance(create_base_instance):
 #         return error, gradient
     
     
-    def compute_swav(self, client_embedding, crops_for_assign, nmb_crops, temperature, epsilon, sinkhorn_iterations, enqueue = True, pool = None):
+#     def compute_swav2(self, client_embedding, crops_for_assign, nmb_crops, temperature, epsilon, sinkhorn_iterations, enqueue = True, pool = None):
+#         # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
+#         # client_embedding是两个tensor组成的list
+        
+# #         print(f"server-side prototypes：{self.model}")
+#         # normalize the prototypes
+#         with torch.no_grad():
+#             w = self.prototypes.weight.data.clone()
+#             w = nn.functional.normalize(w, dim=1, p=2)
+#             self.prototypes.weight.copy_(w)
+#         self.prototypes.to(self.device)
+            
+#         # ============ swav loss ... ============
+#         query_0 = client_embedding[0] # 标准crop的tensor. [B*num_crops[0]*len(pool), args.K_dim]
+#         query_1 = client_embedding[1] # 其余crop的tensor. [B*num_crops[1]*len(pool), args.K_dim]
+#         query_0.requires_grad=True
+#         query_0.retain_grad()
+#         bs_i = int(query_0.size(0)/nmb_crops[0]) 
+        
+#         # 计算两类增强样本的进一步表征
+# #         pdb.set_trace()
+#         embedding_0 = self.model(query_0.to(self.device, non_blocking=True))
+#         embedding_1 = self.model(query_1.to(self.device, non_blocking=True))
+        
+#         # 用prototypes层处理，计算两类增强样本表征的分类scores。
+#         score_0 = self.prototypes(embedding_0) #用prototypes层处理，得到所有表征的分类scores。
+#         score_1 = self.prototypes(embedding_1)
+
+#         loss_i = 0 # 第i个client的loss
+#         for queue_i, crop_id in enumerate(crops_for_assign): #crop_id==0,1
+#             with torch.no_grad():
+#                 embedding = embedding_0[bs_i * crop_id: bs_i * (crop_id + 1)]
+#                 score = score_0[bs_i * crop_id: bs_i * (crop_id + 1)].detach()
+#                 if self.queue is not None:
+#                     if self.use_the_queue or not torch.all(self.queue[queue_i, :, -1]==0):
+#                         self.use_the_queue=True
+#                         score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.weight.t()), score))
+#                         self._dequeue_and_enqueue_swav(embedding, queue_i, pool) # 更新队列
+
+#                 q = self.distributed_sinkhorn(score, epsilon, sinkhorn_iterations)[-bs_i:] #assign
+
+#             subloss = 0
+#             # 计算与其他标准增强样本的loss(其实就1个)
+#             for v in np.delete(range(nmb_crops[0]), crop_id):
+#                 label = score_0[bs_i * v: bs_i * (v + 1)] / temperature
+#                 subloss -= torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
+#             # 计算与其他非标准增强样本的loss
+#             for v in range(sum(nmb_crops)-nmb_crops[0]):
+#                 label = score_1[bs_i * v: bs_i * (v + 1)] / temperature
+#                 subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
+#             loss_i = loss_i + subloss / (sum(nmb_crops) - 1)
+
+#         loss_i = loss_i / len(crops_for_assign) # 默认情况下crops_for_assign==[0,1]
+#         # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在反向传播前先将query_0的梯度清零
+#         if query_0.grad is not None:
+#             query_0.grad.zero_() 
+        
+#         loss_i.backward()
+#         torch.cuda.empty_cache()
+#         # 默认情况下crops_for_assign==[0,1]
+#         gradient = query_0.grad.detach().clone() # get gradient, the -1 is important, since updates are added to the weights in cpp.
+#             # query_0.grad.size() == torch.Size([32, 64, 224, 224])?
+            
+#         error = loss_i.detach().cpu().numpy() # error变量用于记录loss的数值
+
+#         return error, gradient
+    
+    
+    def compute_swav(self, client_embedding_list, crops_for_assign, nmb_crops, temperature, epsilon, sinkhorn_iterations, enqueue = True, pool = None, use_fp16=False, scaler = None):
         # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
         # client_embedding是两个tensor组成的list
         
@@ -759,59 +830,140 @@ class create_sflmocoserver_instance(create_base_instance):
             w = nn.functional.normalize(w, dim=1, p=2)
             self.prototypes.weight.copy_(w)
         self.prototypes.to(self.device)
-            
-        # ============ swav loss ... ============
-        query_0 = client_embedding[0] # 标准crop的tensor. [B*num_crops[0]*len(pool), args.K_dim]
-        query_1 = client_embedding[1] # 其余crop的tensor. [B*num_crops[1]*len(pool), args.K_dim]
+        
+        bs = []
+        query_0 = []
+        query_1 = []
+        # 先将所有client的embedding合并为一个tensor
+        for client_index, client_id in enumerate(pool):
+            query_i_list = client_embedding_list[client_index] # query_i_list是两个tensor组成的list
+            bs.append(int(query_i_list[0].size(0)/nmb_crops[0]))
+            for crop_id in range(len(nmb_crops)): #crop_id==0,1
+                # query_i_list[crop_id]是一个tensor，包含2/6个相同size的增强样本的表征
+                if crop_id==0: #标准增强样本
+                    query_0.append(query_i_list[crop_id].detach() )
+                elif len(nmb_crops)==2:
+                    query_1.append(query_i_list[crop_id].detach() )
+                else: # 如果multi-crop做了3种size及以上的增强
+                    pass
+                    
+        query_0 = torch.cat(query_0, dim=0) #size==[B*num_crops[0]*len(pool), args.K_dim]
         query_0.requires_grad=True
         query_0.retain_grad()
-        bs_i = int(query_0.size(0)/nmb_crops[0]) 
+        query_1 = torch.cat(query_1, dim=0) #size==[B*num_crops[1]*len(pool), args.K_dim]
         
+        count_bs_0 = [0]
+        count_bs_1 = [0]
+        for i in range(len(pool)):
+            count_bs_0.append(count_bs_0[i] + bs[i]*nmb_crops[0])
+            count_bs_1.append(count_bs_1[i] + bs[i]*nmb_crops[1])
+        
+        # ============ swav loss ... ============
         # 计算两类增强样本的进一步表征
-#         pdb.set_trace()
-        embedding_0 = self.model(query_0.to(self.device, non_blocking=True))
-        embedding_1 = self.model(query_1.to(self.device, non_blocking=True))
         
-        # 用prototypes层处理，计算两类增强样本表征的分类scores。
-        score_0 = self.prototypes(embedding_0) #用prototypes层处理，得到所有表征的分类scores。
-        score_1 = self.prototypes(embedding_1)
+        if use_fp16:
+            with autocast():
+#                 pdb.set_trace()
+                embedding_0 = self.model(query_0.to(self.device, non_blocking=True))
+                # 用prototypes层处理，计算两类增强样本表征的分类scores。
+                embedding_0 = nn.functional.normalize(embedding_0, dim=1, p=2)
+                score_0 = self.prototypes(embedding_0) #用prototypes层处理，得到所有表征的分类scores。
+                score_1 = self.model(query_1.to(self.device))
+                score_1 = nn.functional.normalize(score_1, dim=1, p=2)
+                score_1 = self.prototypes(score_1)
+                
+                loss_i = 0 # 第i个client的loss
+                total_loss = 0
+                for client_index, client_id in enumerate(pool):
+                    bs_i = bs[client_index] # 表示第i个client的batch_size
+                    begin_i_index_0 = count_bs_0[client_index] # 表示第i个client的标准样本表征的起始位置
+                    begin_i_index_1 = count_bs_1[client_index] # 表示第i个client的非标准样本表征的起始位置
+                    for queue_i, crop_id in enumerate(crops_for_assign): #crop_id==0,1
+                        with torch.no_grad():
+                            embedding = embedding_0[begin_i_index_0 + bs_i * crop_id : begin_i_index_0 + bs_i * (crop_id + 1)]
+                            score = score_0[begin_i_index_0  + bs_i * crop_id: begin_i_index_0 + bs_i * (crop_id + 1)].detach()
+                            if self.queue is not None:
+                                if self.use_the_queue or not torch.all(self.queue[queue_i, :, -1]==0):
+                                    self.use_the_queue=True
+                                    score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.weight.t()), score))
+                                    self._dequeue_and_enqueue_swav(embedding, queue_i, pool) # 更新队列
 
-        loss_i = 0 # 第i个client的loss
-        for queue_i, crop_id in enumerate(crops_for_assign): #crop_id==0,1
-            with torch.no_grad():
-                embedding = embedding_0[bs_i * crop_id: bs_i * (crop_id + 1)]
-                score = score_0[bs_i * crop_id: bs_i * (crop_id + 1)].detach()
-                if self.queue is not None:
-                    if self.use_the_queue or not torch.all(self.queue[queue_i, :, -1]==0):
-                        self.use_the_queue=True
-                        score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.weight.t()), score))
-                        self._dequeue_and_enqueue_swav(embedding, queue_i, pool) # 更新队列
+                            q = self.distributed_sinkhorn(score, epsilon, sinkhorn_iterations)[-bs_i:] #assign
+                        
+                        subloss = 0
+                        # 计算与其他标准增强样本的loss(其实就1个)
+                        for v in np.delete(range(nmb_crops[0]), crop_id):
+                            label = score_0[begin_i_index_0 + bs_i * v: begin_i_index_0 + bs_i * (v + 1)] / temperature
+                            subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
+                        # 计算与其他非标准增强样本的loss
+                        for v in range(sum(nmb_crops)-nmb_crops[0]):
+                            label = score_1[begin_i_index_1 + bs_i * v: begin_i_index_1 + bs_i * (v + 1)] / temperature
+                            subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
+                        loss_i = loss_i + subloss / (sum(nmb_crops) - 1)
 
-                q = self.distributed_sinkhorn(score, epsilon, sinkhorn_iterations)[-bs_i:] #assign
+                    loss_i = loss_i / len(crops_for_assign) # 默认情况下crops_for_assign==[0,1]
+                    total_loss = total_loss + loss_i
+#                     pdb.set_trace()
+                # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在反向传播前先将query_0的梯度清零
+                if query_0.grad is not None:
+                    query_0.grad.zero_() 
+                
 
-            subloss = 0
-            # 计算与其他标准增强样本的loss(其实就1个)
-            for v in np.delete(range(nmb_crops[0]), crop_id):
-                label = score_0[bs_i * v: bs_i * (v + 1)] / temperature
-                subloss -= torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
-            # 计算与其他非标准增强样本的loss
-            for v in range(sum(nmb_crops)-nmb_crops[0]):
-                label = score_1[bs_i * v: bs_i * (v + 1)] / temperature
-                subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
-            loss_i = loss_i + subloss / (sum(nmb_crops) - 1)
+                scaler.scale(total_loss).backward()
+                torch.cuda.empty_cache()
+                # 默认情况下crops_for_assign==[0,1]
 
-        loss_i = loss_i / len(crops_for_assign) # 默认情况下crops_for_assign==[0,1]
-        # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在反向传播前先将query_0的梯度清零
-        if query_0.grad is not None:
-            query_0.grad.zero_() 
-        
-        loss_i.backward()
-        torch.cuda.empty_cache()
-        # 默认情况下crops_for_assign==[0,1]
+        else:
+            embedding_0 = self.model(query_0.to(self.device, non_blocking=True))
+            # 用prototypes层处理，计算两类增强样本表征的分类scores。
+            score_0 = self.prototypes(embedding_0) #用prototypes层处理，得到所有表征的分类scores。
+            score_1 = self.model(query_1.to(self.device))
+            score_1 = self.prototypes(score_1)
+
+            loss_i = 0 # 第i个client的loss
+            total_loss = 0
+            for client_index, client_id in enumerate(pool):
+                bs_i = bs[client_index] # 表示第i个client的batch_size
+                begin_i_index_0 = count_bs_0[client_index] # 表示第i个client的标准样本表征的起始位置
+                begin_i_index_1 = count_bs_1[client_index] # 表示第i个client的非标准样本表征的起始位置
+                for queue_i, crop_id in enumerate(crops_for_assign): #crop_id==0,1
+                    with torch.no_grad():
+                        embedding = embedding_0[begin_i_index_0 + bs_i * crop_id : begin_i_index_0 + bs_i * (crop_id + 1)]
+                        score = score_0[begin_i_index_0  + bs_i * crop_id: begin_i_index_0 + bs_i * (crop_id + 1)].detach()
+                        if self.queue is not None:
+                            if self.use_the_queue or not torch.all(self.queue[queue_i, :, -1]==0):
+                                self.use_the_queue=True
+                                score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.weight.t()), score))
+                                self._dequeue_and_enqueue_swav(embedding, queue_i, pool) # 更新队列
+
+                        q = self.distributed_sinkhorn(score, epsilon, sinkhorn_iterations)[-bs_i:] #assign
+
+#                     pdb.set_trace()
+                    subloss = 0
+                    # 计算与其他标准增强样本的loss(其实就1个)
+                    for v in np.delete(range(nmb_crops[0]), crop_id):
+                        label = score_0[begin_i_index_0 + bs_i * v: begin_i_index_0 + bs_i * (v + 1)] / temperature
+                        subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
+                    # 计算与其他非标准增强样本的loss
+                    for v in range(sum(nmb_crops)-nmb_crops[0]):
+                        label = score_1[begin_i_index_1 + bs_i * v: begin_i_index_1 + bs_i * (v + 1)] / temperature
+                        subloss = subloss - torch.mean(torch.sum(q * F.log_softmax(label, dim=1), dim=1))
+                    loss_i = loss_i + subloss / (sum(nmb_crops) - 1)
+
+                loss_i = loss_i / len(crops_for_assign) # 默认情况下crops_for_assign==[0,1]
+                total_loss = total_loss + loss_i
+                pdb.set_trace()
+            # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在反向传播前先将query_0的梯度清零
+            if query_0.grad is not None:
+                query_0.grad.zero_() 
+#             pdb.set_trace()  
+            total_loss.backward()
+            torch.cuda.empty_cache()
+            # 默认情况下crops_for_assign==[0,1]
         gradient = query_0.grad.detach().clone() # get gradient, the -1 is important, since updates are added to the weights in cpp.
             # query_0.grad.size() == torch.Size([32, 64, 224, 224])?
             
-        error = loss_i.detach().cpu().numpy() # error变量用于记录loss的数值
+        error = total_loss.detach().cpu().numpy() # error变量用于记录loss的数值
 
         return error, gradient
     
@@ -848,7 +1000,7 @@ class create_sflmococlient_instance(create_base_instance):
         start_idx = 0
         for end_idx in idx_crops:
 #             _out = self.model(torch.cat(input[start_idx: end_idx]).cuda(non_blocking=True)) 
-            _out = self.model(torch.cat(input[start_idx: end_idx])).detach()
+            _out = self.model(torch.cat(input[start_idx: end_idx]))
             self.output.append(_out)
 #             if start_idx == 0:
 #                 self.output = _out
@@ -861,7 +1013,7 @@ class create_sflmococlient_instance(create_base_instance):
 
         # self.output是个list，其中包含了len(self.size_crops)==2个tensor。第一个tensor包含nmb_crops[0]==2个标准增强样本的表征，第二个tensor包含nmb_crops[1]==6个增强样本的表征
 #         return self.output.detach() 
-        return self.output  # .detach()操作放到compute_swav中执行
+        return self.output  # .detach()操作要放到compute_swav中执行,否则就无法再进行反向传播了
 
     def backward(self, external_grad):
         if self.output is not None:

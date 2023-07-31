@@ -15,6 +15,8 @@ import math
 import torch.nn as nn
 import numpy as np
 from functions.base_funtions import base_simulator, create_base_instance
+import pdb
+
 class sfl_simulator(base_simulator):
     def __init__(self, model, criterion, train_loader, test_loader, args) -> None:
         super().__init__(model, criterion, train_loader, test_loader, args)
@@ -140,12 +142,17 @@ def client_backward(sfl_simulator, pool, gradient_dict):
         sfl_simulator.c_optimizer_list[client_id].step()
         sfl_simulator.c_scheduler_list[client_id].step()
         
-def client_backward_swav(sfl_simulator, pool, gradient_dict, num_crops):
+def client_backward_swav(sfl_simulator, pool, gradient_dict, use_fp16 = False, scaler=None):
     for i, client_id in enumerate(pool):
-        for crops_index in range(len(num_crops)):
-            sfl_simulator.c_instance_list[client_id].backward(gradient_dict[i])
-        sfl_simulator.c_optimizer_list[client_id].step()
+#         pdb.set_trace()
+        sfl_simulator.c_instance_list[client_id].backward(gradient_dict[i])
+        if use_fp16:
+            scaler.step(sfl_simulator.c_optimizer_list[client_id])
+        else:
+            sfl_simulator.c_optimizer_list[client_id].step()
         sfl_simulator.c_scheduler_list[client_id].step()
+    if use_fp16: #在所有client的优化器都更新之后,再更新scaler
+        scaler.update()
 
 if __name__ == '__main__':
     '''This is a tutorial on how to use them'''

@@ -17,6 +17,7 @@ from functions.sfl_functions import client_backward, loss_based_status, client_b
 from functions.attack_functions import MIA_attacker, MIA_simulator
 from Dali.get_dali_dataloader import get_cifar10_dali, get_cifar10_Dali_loader
 from Dali.load_cifar10_data import load_cifar10
+from torch.cuda import amp
 import gc
 import pdb
 VERBOSE = False
@@ -126,18 +127,27 @@ criterion = nn.CrossEntropyLoss().to(args.device)
 #initialize sfl
 sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args)
 
+sfl.log(args)
+
+if args.use_fp16:
+    scaler = amp.GradScaler()
+else:
+    scaler = None
+
 # '''Initialze with ResSFL resilient model '''  # resilient model是什么？
 # if args.initialze_path != "None":
 #     sfl.log("Load from resilient model, train with client LR of {}".format(args.c_lr))
 #     sfl.load_model_from_path(args.initialze_path, load_client = True, load_server = args.load_server)
 #     args.attack = True
 
-if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
-#     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
-    sfl.cuda(args.device)
-else:
-    sfl.cpu()
-sfl.s_instance.cuda(args.device)
+sfl.cuda(args.device)
+# ###原来的sfl####
+# if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
+# #     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
+#     sfl.cuda(args.device)
+# else:
+#     sfl.cpu()
+# sfl.s_instance.cuda(args.device)
 
 # '''ResSFL training''' 
 # if args.enable_ressfl: # 这一部分暂时没用
@@ -192,8 +202,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 client_embedding_list = [None for _ in range(len(pool))] 
                 # 用于存放每个client的所有hidden_query
                 scores_list = [None for _ in range(len(pool))]
-                gradient_dict = [None for _ in range(len(pool))]
-
+                gradient_dict = {i:None for i in range(len(pool))}
+                bs = []
                 #client forward
                 for client_index, client_id in enumerate(pool): # if distributed, this can be parallelly done.
                     images = sfl.next_swavdata_batch(client_id, args.use_dali)  # images是个list，其中包含2+6个crops
@@ -218,16 +228,17 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                                 ptr+=1
                         images = images_list
 #                     pdb.set_trace()
-                    if args.cutlayer > 1:
-                        for image_id in range(len(images)):
-                            images[image_id] = images[image_id].to(args.device)
+#                     if args.cutlayer > 1:
+                    for image_id in range(len(images)):
+                        images[image_id] = images[image_id].to(args.device)
 #                     if batch==1:
 #                     pdb.set_trace()
                     embedding = sfl.c_instance_list[client_id](images)# (client-side model计算表征)
                     # embedding是个list，其中包含了len(self.size_crops)==2个tensor，其中第一个tensor包含nmb_crops[0]==2个标准增强样本的表征，第二个tensor包含nmb_crops[1]==6个增强样本的表征
                     #.detach操作在sflswav_functions.py-->create_sflmococlient_instance-->forward函数中做过了
                     # 使用client-side部分对aug1进行表征
-#                     client_embedding_list[client_index] = embedding 
+                    client_embedding_list[client_index] = embedding 
+                    bs.append(int(embedding[0].size(0)/args.nmb_crops[0]))
                     
 #                 stack_hidden_query = torch.cat(hidden_query_list, dim = 0)#将所有client的表征拼接起来
                 # stack_hidden_pkey：(num_client*batch_size, hidden_size, input_size, input_size)
@@ -241,47 +252,59 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             
 #             stack_hidden_query = stack_hidden_query.to(args.device)
 
-                    sfl.s_optimizer.zero_grad()
-                    #server compute
-        #             loss, gradient, accu = sfl.s_instance.compute(hidden_embedding_list, scores_list, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
+                sfl.s_optimizer.zero_grad()
+                #server compute
+    #             loss, gradient, accu = sfl.s_instance.compute(hidden_embedding_list, scores_list, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
 
-                     #注意：此时两个list均在cpu中
-                    loss, gradient_i= sfl.s_instance.compute_swav(
-                        embedding, 
-                        crops_for_assign = args.crops_for_assign, 
-                        nmb_crops = args.nmb_crops, 
-                        temperature = args.temperature, 
-                        epsilon = args.epsilon, 
-                        sinkhorn_iterations = args.sinkhorn_iterations, 
-                        pool = pool) 
+                 #注意：此时两个list均在cpu中
+#                 pdb.set_trace()
+                loss, gradient= sfl.s_instance.compute_swav(
+                    client_embedding_list, 
+                    crops_for_assign = args.crops_for_assign, 
+                    nmb_crops = args.nmb_crops, 
+                    temperature = args.temperature, 
+                    epsilon = args.epsilon, 
+                    sinkhorn_iterations = args.sinkhorn_iterations, 
+                    pool = pool,
+                    use_fp16 = args.use_fp16,
+                    scaler = scaler) 
                 
-                    print(f"epoch:{epoch}, batch:{batch}, client:{client_index}, loss:{loss}")
                     
-                    if iteration < args.freeze_prototypes_niters:
-                            for name, p in model.named_parameters():
-                                if "prototypes" in name:
-                                    p.grad = None
+#                 print(f"epoch:{epoch}, batch:{batch}, client:{client_index}, loss:{loss}")
+                print(f"epoch:{epoch}, batch:{batch}, loss:{loss}")
 
+                if iteration < args.freeze_prototypes_niters:
+                    for name, p in model.named_parameters():
+                        if "prototypes" in name:
+                            p.grad = None
+
+                if args.use_fp16:
+                    scaler.step(sfl.s_optimizer)
+#                     scaler.update()
+                else:
                     sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
-                    if VERBOSE and (batch % 50 == 0 or batch == num_batch - 1):
-                        sfl.log(f"epoch {epoch} batch {batch}, loss {loss}")
-                    avg_loss += loss
-        #             avg_accu += accu
+                if VERBOSE and (batch % 50 == 0 or batch == num_batch - 1):
+                    sfl.log(f"epoch {epoch} batch {batch}, loss {loss}")
+                avg_loss += loss
+    #             avg_accu += accu
 
-                    # distribute gradients to clients
-
-                    for i in range(len(gradient_dict)):
-                        gradient_dict[i] = gradient_i
-                        if args.cutlayer <= 1:
-                            gradient_dict[i] = gradient_dict[i].cpu()
+                # distribute gradients to clients
+                start_index = 0
+#                 pdb.set_trace()
+                for i in range(len(pool)):
+                    gradient_i = gradient[start_index : start_index + bs[i] * len(args.crops_for_assign)]
+#                     if args.cutlayer <= 1:
+#                         gradient_i = gradient_i.cpu()
+                    gradient_dict[i] = gradient_i
+                    start_index = start_index+bs[i] * len(args.crops_for_assign)
+                    
 
             if loss_status.status == "A": # loss大于某个阈值的时候才更新client-side models
                 # Initialize clients' queue, to store partial gradients
-                
                 #client backward
 #                 pdb.set_trace()
-                client_backward_swav(sfl, pool, gradient_dict, args.crops_for_assign) # 各client以自己的gradient进行反向传播
+                client_backward_swav(sfl, pool, gradient_dict, use_fp16 = args.use_fp16, scaler = scaler) # 各client以自己的gradient进行反向传播
             else:
                 # (optional) step client scheduler (lower its LR)
                 pass
@@ -310,8 +333,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
         
         knn_val_acc = sfl.knn_eval(memloader=mem_loader, use_dali = args.use_dali) # 每个epoch计算一次knn_acc。
         # mem_loader被用于KNN分类中的已知类别的样本点集合（是一个DataLoader的list）
-        if args.cutlayer <= 1:
-            sfl.c_instance_list[0].cpu()
+#         if args.cutlayer <= 1:
+#             sfl.c_instance_list[0].cpu()
         if knn_val_acc > knn_accu_max:  # 用knn_accu_max保存最优acc，并保存knn准确率最高时的最优模型(包括server-side model和第0个client-side model)。
             knn_accu_max = knn_val_acc
             sfl.save_model(epoch, is_best = True) # (base_funtions.py)
