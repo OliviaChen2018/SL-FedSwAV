@@ -120,6 +120,7 @@ def partition_data(training_data, labels, num_client, num_class, partition = 'no
     traindata_cls_counts = record_net_data_stats(labels, net_dataidx_map) 
 
     return training_data_subset_list, training_label_subset_list, traindata_cls_counts
+#     return training_data_subset_list, training_label_subset_list, traindata_cls_counts, net_dataidx_map
 
 def record_net_data_stats(y_train, net_dataidx_map):
     '''用于记录每个client的数据分布(拥有的所有样本类别，及该类别出现的次数)'''

@@ -1,5 +1,5 @@
 from load_cifar10_data import *
-from cifar10_Dali_Dataset import *
+from cifar_Dali_Dataset import *
 
 CIFAR10_MEAN=[0.49139968 * 255., 0.48215827 * 255., 0.44653124 * 255.]
 CIFAR10_STD=[0.24703233 * 255., 0.24348505 * 255., 0.26158768 * 255.]

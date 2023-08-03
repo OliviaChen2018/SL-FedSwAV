@@ -4,7 +4,7 @@ cd ../../
 
 #fixed arguments
 num_epoch=200
-lr=0.06
+lr=0.006
 moco_version=V2
 arch=ResNet18
 non_iid_list="1.0"

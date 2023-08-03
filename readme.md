@@ -51,3 +51,9 @@
 2. 新增混合精度训练方式, 对训练过程进一步提速.
 3. 对模型计算得到的表征进行归一化, 以消除表征向量长度对loss的影响.
 4. 新的计算方式下需要更大的显存, 目前单卡只能一次性存放10个client的batch_size=2的20条数据, 训练效果不好. 下一步计划尝试DDP解决这个问题.
+
+2023.8.3
+1. 新增DDP方式下的dataloader sampler和读取方式.(将类CIFAR_INPUT_ITER的实例作为sampler传入DALIDataloader和pipeline, 并再在DALIDataloader类和所有Pipeline类中新增reset函数, 以便在训练过程中重置dataloader)
+2. examples.py文件为Github( https://github.com/NVIDIA/DALI/issues/1356 )上的sampler的实现模板.(灵感来源)
+3. Dali/test_DDP.py为测试文件, 包含了在DaliDataloader方式下以DDP方式训练resnet模型完成cifar10分类任务的全过程. 
+4. 下一步计划将DDP写入我的模型中.

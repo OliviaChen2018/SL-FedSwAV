@@ -12,22 +12,33 @@ import numpy as np
 import cupy as cp
 from sklearn.utils import shuffle
 import pdb
+import torch
 from torch.utils.data import IterableDataset
-from Dali.load_cifar10_data import *
-from Dali.Dali_Dataloader import DALIDataloader
+from load_cifar10_data import *
+from Dali_Dataloader import DALIDataloader
 import time
+import math
 
 CIFAR10_MEAN=[0.49139968 * 255., 0.48215827 * 255., 0.44653124 * 255.]
 CIFAR10_STD=[0.24703233 * 255., 0.24348505 * 255., 0.26158768 * 255.]
 
 class CIFAR_INPUT_ITER():
-    def __init__(self, data, targets, batch_size, train=True):
-        self.data = data
-        self.targets = targets
+    def __init__(self, data, targets, index = None, batch_size=128, train=True, world_size = 1, local_rank = 0, is_distributed = False):
+        self.source_data = data
+        self.source_targets = targets
+        if is_distributed and train:
+            indices = DistributedSampler(data, epoch=0, num_shards=world_size, shard_id=local_rank, shuffle=True)
+            self.data, self.targets = self.source_data[indices],  self.source_targets[indices]
+            np.save(f"data/cifar_{local_rank}.npy", self.data)
+            self.data = np.load(f'data/cifar_{local_rank}.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
+        else:
+            self.data = self.source_data
+            np.save("data/cifar.npy", self.data)
+            self.data = np.load('data/cifar.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
+            self.targets = self.source_targets
         self.batch_size = batch_size
         self.train = train
-        np.save("cifar.npy", self.data)
-        self.data = np.load('cifar.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
+        
         print(self.data.shape)
 
     def __iter__(self):
@@ -40,7 +51,7 @@ class CIFAR_INPUT_ITER():
         labels = []
         for _ in range(self.batch_size):
             if self.train and self.i % self.n == 0: # 训练集才shuffle
-                print("执行shuffle")
+#                 print("执行shuffle")
                 self.data, self.targets = shuffle(self.data, self.targets, random_state=0)
             img, label = self.data[self.i], self.targets[self.i]
             batch.append(img)
@@ -51,14 +62,27 @@ class CIFAR_INPUT_ITER():
 
     next = __next__
     
+    def len(self):
+        return len(self.data)
+    
+    def reset_data(self, epoch, num_shards, shard_id, shuffle = True):
+        indices = DistributedSampler(self.source_data, epoch, num_shards, shard_id, shuffle)
+        self.data, self.targets = self.source_data[indices], self.source_targets[indices]
+        np.save(f"cifar_{shard_id}.npy", self.data)
+        self.data = np.load(f'cifar_{shard_id}.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
+#         print(f"epoch:{epoch}, shard_id:{shard_id}, indices:{indices[:100]}")
+
+
+    
 class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是在构造数据集
-    def __init__(self, data, targets, batch_size, num_threads = 4, device_id=0, size_crops=[224], nmb_crops = [2], min_scale_crops=[0.14], max_scale_crops=[1], dali_cpu=False, local_rank=0, world_size=1, cutout=0, train=True):
+    def __init__(self, sampler, data, targets, batch_size, num_threads = 4, device_id=0, size_crops=[224], nmb_crops = [2], min_scale_crops=[0.14], max_scale_crops=[1], dali_cpu=False, local_rank=0, world_size=1, cutout=0, train=True):
         # Pipeline初始化函数的output_ndim参数: 指定pipeline返回的output list中每个output的维数.比如define_graph返回[output, labels], 则output_ndim应该设定为[output的维数, labels的维数]
         super(DaliTrainPipe_CIFAR_multicrop, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
         assert len(size_crops) == len(nmb_crops)
         assert len(min_scale_crops) == len(nmb_crops)
         assert len(max_scale_crops) == len(nmb_crops)
-        self.iterator = iter(CIFAR_INPUT_ITER(data, targets, batch_size, train))
+#         self.iterator = iter(CIFAR_INPUT_ITER(data, targets, batch_size, train))
+        self.iterator = iter(sampler)
         dali_device = "gpu"
         self.input = ops.ExternalSource()
         self.input_label = ops.ExternalSource()
@@ -111,7 +135,6 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
 
     def iter_setup(self):
         (images, labels) = self.iterator.next() # 调用CIFAR_INPUT_ITER中的__next__函数
-#         pdb.set_trace()
         self.feed_input(self.images, images, layout="HWC") # images是个list,包含batch_size条图片数据, 每条数据是ndarray类型,shape为[32,32,3].
         self.feed_input(self.labels, labels)
         
@@ -151,6 +174,9 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
         hsv = ops.Hsv(device = "gpu", saturation=saturate)
         return hsv
     
+    def reset_iterator(self, sampler):
+        self.iterator = iter(sampler)
+    
     
 # class DataNode1(DataNode):
 #     def __init__(self, name, device="cpu", source=None):
@@ -168,10 +194,11 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
     
     
 class DaliTrainPipe_CIFAR(Pipeline): # 这个pipeline就相当于是在构造数据集
-    def __init__(self, data, targets, batch_size, num_threads = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train=True):
+    def __init__(self, sampler, data, targets, batch_size, num_threads = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train=True):
 #         pdb.set_trace()
         super(DaliTrainPipe_CIFAR, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        self.iterator = iter(CIFAR_INPUT_ITER(data, targets, batch_size, train))
+#         self.iterator = iter(CIFAR_INPUT_ITER(data, targets, batch_size, train))
+        self.iterator = iter(sampler)
         dali_device = "gpu"
         self.input = ops.ExternalSource()
         self.input_label = ops.ExternalSource()
@@ -194,4 +221,61 @@ class DaliTrainPipe_CIFAR(Pipeline): # 这个pipeline就相当于是在构造数
 #         output = self.cmnp(output, mirror=0) 
         output = self.cmnp(output.gpu()) # mirror参数默认为0
         return [output, self.labels]
+    
+    def reset_iterator(self, sampler):
+        self.iterator = iter(sampler)
+    
+    
+class DaliTrainPipe_CIFAR_DDP(Pipeline): # 这个pipeline就相当于是在构造数据集
+    def __init__(self, sampler, data, targets, batch_size, num_threads = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, epoch = 0, is_distributed=False, train=True):
+#         pdb.set_trace()
+        super(DaliTrainPipe_CIFAR_DDP, self).__init__(batch_size, num_threads, device_id=local_rank,  seed=12 + device_id)
+        self.epoch = epoch
+#         self.iterator = iter(CIFAR_INPUT_ITER(data, targets, batch_size, train, is_distributed=True, local_rank=local_rank, world_size=world_size))
+        self.iterator = iter(sampler)
+        dali_device = "gpu"
+        self.input = ops.ExternalSource()
+        self.input_label = ops.ExternalSource()
+        self.cmnp = ops.CropMirrorNormalize(device=dali_device,
+                                            dtype=types.FLOAT,
+                                            image_type=types.RGB,
+                                            mean=CIFAR10_MEAN,
+                                            std=CIFAR10_STD) #这个函数可以实现镜面对称
+    def iter_setup(self):
+        (images, labels) = self.iterator.next() # 调用CIFAR_INPUT_ITER中的__next__函数
+        self.feed_input(self.images, images, layout="HWC") # images是个list,包含batch_size条图片数据, 每条数据是ndarray类型,shape为[32,32,3].
+        self.feed_input(self.labels, labels)
+        
 
+    def define_graph(self): #这个函数是定义怎么对图像进行变换.
+        self.images = self.input()
+        self.labels = self.input_label()
+        output = self.images
+#         output = self.cmnp(output, mirror=0) 
+        output = self.cmnp(output.gpu()) # mirror参数默认为0
+        return [output, self.labels]
+    
+    def reset_iterator(self, sampler):
+        self.iterator = iter(sampler)
+        
+    
+def DistributedSampler(data, epoch, num_shards, shard_id, shuffle=True):
+    g = torch.Generator()
+    g.manual_seed(epoch)
+    num_samples = math.ceil(len(data) / num_shards) # 表示每张卡上的sample数量
+    total_size = num_samples * num_shards
+    if shuffle:
+        indices = torch.randperm(len(data), generator=g).tolist()
+    else:
+        indices = list(range(len(data)))
+    
+    # add extra samples to make it evenly divisible
+    indices += indices[:(total_size - len(indices))]
+    assert len(indices) == total_size
+    
+    # subsample
+    indices = indices[shard_id:total_size:num_shards]
+    assert len(indices) == num_samples
+    
+    return indices
+    
