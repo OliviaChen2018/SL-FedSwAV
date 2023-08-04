@@ -29,7 +29,19 @@ set_deterministic(args.seed)
 
 '''Preparing'''
 #get data
-test_data, test_targets = load_cifar10(train=False, root=args.data_dir)
+# if args.is_distributed:
+#     train_data, train_targets = load_cifar10(train=True, root=args.data_dir)
+#     test_data, test_targets = load_cifar10(train=False, root=args.data_dir)
+    # training_data_list, training_label_list, traindata_cls_counts, net_dataidx_map = partition_data(train_data,
+    #                        train_targets,
+    #                        num_client=args.num_client,
+    #                        num_class=10, 
+    #                        partition = 'noniid', 
+    #                        beta=0.4)
+    # for client_index in range(len(training_data_list)): 
+    #     np.save(f"data/cifar{client_index}_index.npy", np.array(net_dataidx_map[client_index]))
+#     pass
+
 if args.use_dali is True:
     train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali(
         size_crops=args.size_crops, nmb_crops=args.nmb_crops, min_scale_crops=args.min_scale_crops, max_scale_crops=args.max_scale_crops, 

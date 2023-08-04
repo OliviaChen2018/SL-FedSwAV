@@ -1,3 +1,5 @@
+# 按Dirichlet分布划分数据集, 并将划分后的index保存下来, 每次训练都使用同一种划分结果, 以便于复现.
+
 from load_cifar10_data import *
 
 image_dir = "../data/"

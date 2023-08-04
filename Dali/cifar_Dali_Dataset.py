@@ -14,8 +14,8 @@ from sklearn.utils import shuffle
 import pdb
 import torch
 from torch.utils.data import IterableDataset
-from load_cifar10_data import *
-from Dali_Dataloader import DALIDataloader
+from Dali.load_cifar10_data import *
+from Dali.Dali_Dataloader import DALIDataloader
 import time
 import math
 
@@ -23,18 +23,18 @@ CIFAR10_MEAN=[0.49139968 * 255., 0.48215827 * 255., 0.44653124 * 255.]
 CIFAR10_STD=[0.24703233 * 255., 0.24348505 * 255., 0.26158768 * 255.]
 
 class CIFAR_INPUT_ITER():
-    def __init__(self, data, targets, index = None, batch_size=128, train=True, world_size = 1, local_rank = 0, is_distributed = False):
+    def __init__(self, data, targets, batch_size=128, train=True, world_size = 1, local_rank = 0, is_distributed = False):
         self.source_data = data
         self.source_targets = targets
-        if is_distributed and train:
-            indices = DistributedSampler(data, epoch=0, num_shards=world_size, shard_id=local_rank, shuffle=True)
+        if is_distributed:
+            indices = DistributedSampler(data, epoch=0, num_shards=world_size, shard_id=local_rank, shuffle=train)
             self.data, self.targets = self.source_data[indices],  self.source_targets[indices]
-            np.save(f"data/cifar_{local_rank}.npy", self.data)
-            self.data = np.load(f'data/cifar_{local_rank}.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
+            np.save(f"data/cifar_{local_rank}_train_{train}.npy", self.data)
+            self.data = np.load(f'data/cifar_{local_rank}_train_{train}.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
         else:
             self.data = self.source_data
-            np.save("data/cifar.npy", self.data)
-            self.data = np.load('data/cifar.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
+            np.save(f"data/cifar_{local_rank}_train_{train}.npy", self.data)
+            self.data = np.load(f'data/cifar_{local_rank}_train_{train}.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
             self.targets = self.source_targets
         self.batch_size = batch_size
         self.train = train
@@ -68,8 +68,8 @@ class CIFAR_INPUT_ITER():
     def reset_data(self, epoch, num_shards, shard_id, shuffle = True):
         indices = DistributedSampler(self.source_data, epoch, num_shards, shard_id, shuffle)
         self.data, self.targets = self.source_data[indices], self.source_targets[indices]
-        np.save(f"cifar_{shard_id}.npy", self.data)
-        self.data = np.load(f'cifar_{shard_id}.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
+        np.save(f"data/cifar_{shard_id}_train_{self.train}.npy", self.data)
+        self.data = np.load(f'data/cifar_{shard_id}_train_{self.train}.npy')  # to serialize, increase locality #这一步一定要用,否则会报错???
 #         print(f"epoch:{epoch}, shard_id:{shard_id}, indices:{indices[:100]}")
 
 
@@ -77,7 +77,7 @@ class CIFAR_INPUT_ITER():
 class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是在构造数据集
     def __init__(self, sampler, data, targets, batch_size, num_threads = 4, device_id=0, size_crops=[224], nmb_crops = [2], min_scale_crops=[0.14], max_scale_crops=[1], dali_cpu=False, local_rank=0, world_size=1, cutout=0, train=True):
         # Pipeline初始化函数的output_ndim参数: 指定pipeline返回的output list中每个output的维数.比如define_graph返回[output, labels], 则output_ndim应该设定为[output的维数, labels的维数]
-        super(DaliTrainPipe_CIFAR_multicrop, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
+        super(DaliTrainPipe_CIFAR_multicrop, self).__init__(batch_size, num_threads, device_id=device_id, seed=12 + local_rank)
         assert len(size_crops) == len(nmb_crops)
         assert len(min_scale_crops) == len(nmb_crops)
         assert len(max_scale_crops) == len(nmb_crops)
@@ -196,7 +196,7 @@ class DaliTrainPipe_CIFAR_multicrop(Pipeline): # 这个pipeline就相当于是�
 class DaliTrainPipe_CIFAR(Pipeline): # 这个pipeline就相当于是在构造数据集
     def __init__(self, sampler, data, targets, batch_size, num_threads = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, cutout=0, train=True):
 #         pdb.set_trace()
-        super(DaliTrainPipe_CIFAR, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
+        super(DaliTrainPipe_CIFAR, self).__init__(batch_size, num_threads, device_id=device_id, seed=12 + local_rank)
 #         self.iterator = iter(CIFAR_INPUT_ITER(data, targets, batch_size, train))
         self.iterator = iter(sampler)
         dali_device = "gpu"
@@ -229,7 +229,7 @@ class DaliTrainPipe_CIFAR(Pipeline): # 这个pipeline就相当于是在构造数
 class DaliTrainPipe_CIFAR_DDP(Pipeline): # 这个pipeline就相当于是在构造数据集
     def __init__(self, sampler, data, targets, batch_size, num_threads = 4, device_id=0, dali_cpu=False, local_rank=0, world_size=1, epoch = 0, is_distributed=False, train=True):
 #         pdb.set_trace()
-        super(DaliTrainPipe_CIFAR_DDP, self).__init__(batch_size, num_threads, device_id=local_rank,  seed=12 + device_id)
+        super(DaliTrainPipe_CIFAR_DDP, self).__init__(batch_size, num_threads, device_id=local_rank,  seed=12 + local_rank)
         self.epoch = epoch
 #         self.iterator = iter(CIFAR_INPUT_ITER(data, targets, batch_size, train, is_distributed=True, local_rank=local_rank, world_size=world_size))
         self.iterator = iter(sampler)

@@ -11,6 +11,7 @@ from cifar_Dali_Dataset import *
 import numpy as np
 import pdb
 import logging
+from utils import setup_logger, distributed_concat
 from resnet import *
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,5,6"
@@ -33,46 +34,12 @@ CROP_SIZE = 32
 
 image_dir = "../data/"
 output_dir = "dali_output/"
-batch_size = 128
+batch_size = 64
 # NMB_CROPS = [2,6]
 # SIZE_CROPS = [224,96]
 # MIN_SCALE = [0.14,0.05]
 # MAX_SCALE = [1,0.14]
 
-def setup_logger(name, log_file, level=logging.INFO, console_out = True):
-    """To setup as many loggers as you want"""
-    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-    handler = logging.FileHandler(log_file, mode='a')
-    handler.setFormatter(formatter)
-
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    while logger.hasHandlers():
-        logger.removeHandler(logger.handlers[0])
-    logger.addHandler(handler)
-    if console_out:
-        stdout_handler = logging.StreamHandler(sys.stdout)
-        logger.addHandler(stdout_handler)
-    return logger
-
-class ToyModel(nn.Module):
-    def __init__(self):
-        super(ToyModel, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
-    def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
-    
 class CNNNet(nn.Module):
     def __init__(self):
         super(CNNNet, self).__init__()
@@ -95,20 +62,14 @@ class CNNNet(nn.Module):
         x = F.relu(self.fc2(F.relu(self.fc1(x))))
         return x
     
-def distributed_concat(tensor, num_total_examples):
-    output_tensors = [tensor.clone() for _ in range(world_size)]
-    torch.distributed.all_gather(output_tensors, tensor)
-    concat = torch.cat(output_tensors, dim=0)
-    # truncate the dummy elements added by SequentialDistributedSampler
-    return concat[:num_total_examples]
-
+model_log_file = output_dir + '/test.log'
+logger = setup_logger('default_logger', model_log_file, level=logging.DEBUG)
+    
 data, targets = load_cifar10(train=True, root=image_dir)
 test_data, test_targets = load_cifar10(train=False, root=image_dir)
 # index = np.load("data/cifar0_index.npy")
-model_log_file = output_dir + '/test.log'
-logger = setup_logger('default_logger', model_log_file, level=logging.DEBUG)
-sampler = CIFAR_INPUT_ITER(data, targets, batch_size, train=True, is_distributed=True)
-test_sampler = CIFAR_INPUT_ITER(test_data, test_targets, batch_size, train=False)
+sampler = CIFAR_INPUT_ITER(data, targets, batch_size=batch_size, train=True, world_size = world_size, local_rank = local_rank, is_distributed=True)
+test_sampler = CIFAR_INPUT_ITER(test_data, test_targets, batch_size=batch_size, world_size = world_size, local_rank = local_rank, train=False, is_distributed=True)
 pip_train = DaliTrainPipe_CIFAR(sampler, 
                                     data,
                                     targets,
@@ -117,7 +78,7 @@ pip_train = DaliTrainPipe_CIFAR(sampler,
                                     device_id=local_rank, 
                                     world_size=world_size, 
                                     local_rank=local_rank)
-pip_test = DaliTrainPipe_CIFAR(sampler, 
+pip_test = DaliTrainPipe_CIFAR(test_sampler, 
                                     test_data,
                                     test_targets,
                                     batch_size=batch_size, 
@@ -153,7 +114,6 @@ print('[DALI] start iterate train dataloader')
 
 # 构造模型
 device = torch.device("cuda", local_rank) # 获取device，之后的模型和张量都.to(device)
-# model = ToyModel().to(local_rank)
 # model = CNNNet().to(local_rank)
 model = ResNet18().to(local_rank)
 # model = nn.Linear(10, 10).to(device)
@@ -194,9 +154,9 @@ for epoch in range(200):
             labels.append(label)
         # 进行gather
         predictions = distributed_concat(torch.concat(predictions, dim=0), 
-                                         len(test_data))
+                                         len(test_data), world_size)
         labels = distributed_concat(torch.concat(labels, dim=0), 
-                                    len(test_data))
+                                    len(test_data), world_size)
         # 3. 现在我们已经拿到所有数据的predictioin结果，进行evaluate！
 #         my_evaluate_func(predictions, labels)
         pre_labels= torch.argmax(predictions, dim=1)
@@ -205,7 +165,7 @@ for epoch in range(200):
         
         correct /= predictions.size(0)
         print(f"epoch:{epoch} acc is :{correct}")
-        test_loader.reset(epoch=0)
+        test_loader.reset(epoch=0, shuffle = False)
         test_loader._ever_consumed = False # 这一步是为了防止train_loader自动调用.reset()函数
 
 end = time.time()

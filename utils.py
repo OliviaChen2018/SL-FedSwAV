@@ -61,6 +61,13 @@ def accuracy(output, target, topk=(1,)): # 返回top1,top2,...,topk所有的正�
         res.append(correct_k.mul_(100.0 / batch_size)) # res存放了top1,top2,...所有的正确率
     return res
 
+def distributed_concat(tensor, num_total_examples, world_size):
+    output_tensors = [tensor.clone() for _ in range(world_size)]
+    torch.distributed.all_gather(output_tensors, tensor)
+    concat = torch.cat(output_tensors, dim=0)
+    # truncate the dummy elements added by SequentialDistributedSampler
+    return concat[:num_total_examples]
+
 class AverageMeter(object): # 一个用于存储和 和 均值的对象
     """Computes and stores the average and current value"""
     def __init__(self):
