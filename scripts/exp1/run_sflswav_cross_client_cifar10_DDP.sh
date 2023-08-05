@@ -23,9 +23,10 @@ for num_client in $num_client_list; do
         for noniid_ratio in $non_iid_list; do
                 for cutlayer in $cutlayer_list; do
                         output_dir="./outputs/SwavSfl${moco_version}_${arch}_${dataset}_cut${cutlayer}_bnl${bottleneck_option}_client${num_client}_nonIID${noniid_ratio}_dirichlet"
-                        python run_sflswav.py --num_client ${num_client} --lr ${lr} --cutlayer ${cutlayer} --num_epoch ${num_epoch}\
+                        torchrun --nproc_per_node=4 run_sflswav.py\
+                                --num_client ${num_client} --lr ${lr} --cutlayer ${cutlayer} --num_epoch ${num_epoch}\
                                 --nmb_crops 2 6 --size_crops 224 96 --min_scale_crops 0.14 0.05 --max_scale_crops 1 0.14\
-                                --use_dali --use_fp16\
+                                --use_dali --use_fp16 --is_distributed\
                                 --queue_length ${queue_length}\
                                 --noniid_ratio ${noniid_ratio}  --hetero --output_dir ${output_dir}\
                                 --moco_version ${moco_version} --arch ${arch} --dataset ${dataset} --loss_threshold ${loss_threshold}\

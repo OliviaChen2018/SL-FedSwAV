@@ -24,8 +24,8 @@ import pdb
 
 
 class sflmoco_simulator(base_simulator):
-    def __init__(self, model, criterion, train_loader, test_loader, args) -> None:
-        super().__init__(model, criterion, train_loader, test_loader, args)
+    def __init__(self, model, criterion, train_loader, test_loader, device, args) -> None:
+        super().__init__(model, criterion, train_loader, test_loader, device, args)
         
         # Create server instances
         if self.model.cloud is not None:

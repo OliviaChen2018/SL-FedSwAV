@@ -15,32 +15,42 @@ from models.resnet import init_weights
 from functions.sflswav_functions import sflmoco_simulator
 from functions.sfl_functions import client_backward, loss_based_status, client_backward_swav
 from functions.attack_functions import MIA_attacker, MIA_simulator
-from Dali.get_dali_dataloader import get_cifar10_dali, get_cifar10_Dali_loader
+from Dali.get_dali_dataloader import get_cifar10_dali, get_cifar10_Dali_loader, get_cifar10_dali_DDP
 from Dali.load_cifar10_data import load_cifar10
 from torch.cuda import amp
 import gc
 import pdb
+import os
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 VERBOSE = False
 #get default args
 args = get_sfl_args()
 set_deterministic(args.seed)
 
 # print(f"print args:\n {args}")
+os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5"
 
 '''Preparing'''
 #get data
-# if args.is_distributed:
-#     train_data, train_targets = load_cifar10(train=True, root=args.data_dir)
-#     test_data, test_targets = load_cifar10(train=False, root=args.data_dir)
-    # training_data_list, training_label_list, traindata_cls_counts, net_dataidx_map = partition_data(train_data,
-    #                        train_targets,
-    #                        num_client=args.num_client,
-    #                        num_class=10, 
-    #                        partition = 'noniid', 
-    #                        beta=0.4)
-    # for client_index in range(len(training_data_list)): 
-    #     np.save(f"data/cifar{client_index}_index.npy", np.array(net_dataidx_map[client_index]))
-#     pass
+if args.is_distributed:
+    local_rank = int(os.environ["LOCAL_RANK"]) 
+    print(f"local_rank: {local_rank}\n")
+    world_size = int(os.environ["WORLD_SIZE"]) 
+    print(f"world_size: {world_size}")
+
+    # 新增：DDP backend初始化
+    torch.cuda.set_device(local_rank) # 设置device
+    dist.init_process_group(backend='nccl')  # 初始化多进程. nccl是GPU设备上最快、最推荐的后端
+    
+    # load data
+    train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali_DDP(
+        size_crops=args.size_crops, nmb_crops=args.nmb_crops, min_scale_crops=args.min_scale_crops, max_scale_crops=args.max_scale_crops, 
+        batch_size=args.batch_size, num_workers=args.num_workers, num_client = args.num_client, 
+        data_proportion = args.data_proportion, noniid_ratio =args.noniid_ratio, 
+        pairloader_option = args.pairloader_option, 
+        partition = args.partition, partition_beta = 0.4, hetero = args.hetero, 
+        path_to_data = args.data_dir, world_size = world_size, local_rank=local_rank)
 
 if args.use_dali is True:
     train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali(
@@ -51,6 +61,7 @@ if args.use_dali is True:
         partition = args.partition, partition_beta = 0.4, hetero = args.hetero, 
         path_to_data = args.data_dir)
     # 之后遍历train_loader要先把数据的size还原
+    world_size = 1
 else:
     create_dataset = getattr(datasets, f"get_{args.dataset}")
     train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
@@ -69,6 +80,7 @@ else:
         aug_type = args.aug_type,
         hetero = args.hetero, 
         hetero_string = args.hetero_string)
+    world_size = 1
 # datasets.py
 # train_loader ==  get_cifar10_pairloader （train_loader作为对比学习的训练集）
 # mem_loader == get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
@@ -79,7 +91,7 @@ else:
 # for data in train_loader[0]: 
 #     print(data.size())
 #train_loader里包含的是若干个clients的dataloader. 每个dataloader中包含增强样本数量个tensor,每个tensor的维度为[batch_size, 3, size_crop, size_crop]
-num_batch = len(train_loader[0]) # 将第0个client拥有数据的数量作为server-side model的训练epoch数。（即整个模型训练arg.num_epoch轮，每轮中server-side model训练num_batch个batch。每个batch中所有client计算自己数据的表征并将表征在server端聚合）
+num_batch = len(train_loader[0])*world_size # 将第0个client拥有数据的数量作为server-side model的训练epoch数。（即整个模型训练arg.num_epoch轮，每轮中server-side model训练num_batch个batch。每个batch中所有client计算自己数据的表征并将表征在server端聚合）
 
 # resnet, vgg, MobileNetV2分别是./models/中的三个model文件。
 # e.g. args.arch== 'ResNet18'，
@@ -97,7 +109,7 @@ elif "MobileNetV2" in args.arch:
     create_arch =  getattr(mobilenetv2, args.arch)
     output_dim = 1280
 #get model - use a larger classifier, as in Zhuang et al. Divergence-aware paper
-# pdb.set_trace()
+
 global_model = create_arch(cutting_layer=args.cutlayer, 
                            num_client = args.num_client, 
                            num_class=args.K_dim, 
@@ -130,14 +142,18 @@ if args.mlp: # 只有moco V1的mlp是False
     global_model.classifier.apply(init_weights)
 # print(f"global_model的层\n{global_model}")
 global_model.merge_classifier_cloud() # 给模型加上mlp层（global_model的结果依然是对Input的表征）
-
 # 用于训练的整个线性层包括了MLP层
 
+if args.is_distributed:
+    device = torch.device("cuda", local_rank) # 获取device，之后的模型和张量都.to(device)
+else:
+    device = args.device
+    
 #get loss function
-criterion = nn.CrossEntropyLoss().to(args.device)
+criterion = nn.CrossEntropyLoss().to(device)
 
 #initialize sfl
-sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args)
+sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, device, args)
 
 sfl.log(args)
 
@@ -152,7 +168,8 @@ else:
 #     sfl.load_model_from_path(args.initialze_path, load_client = True, load_server = args.load_server)
 #     args.attack = True
 
-sfl.cuda(args.device)
+
+sfl.cuda(device)
 # ###原来的sfl####
 # if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
 # #     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
@@ -168,6 +185,7 @@ sfl.cuda(args.device)
 #     ressfl.cuda()
 #     ressfl.cuda(args.device)
 #     args.attack = True
+
 
 sfl.log(f'Data statistics: {str(traindata_cls_counts)}')
     

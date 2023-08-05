@@ -17,12 +17,12 @@ from utils import setup_logger
 import pdb
 
 class base_simulator:
-    def __init__(self, model, criterion, train_loader, test_loader, args) -> None:
+    def __init__(self, model, criterion, train_loader, test_loader, device, args) -> None:
         if not model.cloud_classifier_merge:
             model.merge_classifier_cloud()
         model_log_file = args.output_dir + '/output.log'
         self.logger = setup_logger('default_logger', model_log_file, level=logging.DEBUG)
-        self.device = args.device
+        self.device = device
         self.model = model # model是整个模型，会在sfl_simulator类中将该模型划分为client-side model和server-side model。
         self.criterion = criterion
         self.num_client = args.num_client
