@@ -20,6 +20,7 @@ from models.resnet import init_weights
 from utils import AverageMeter, accuracy
 import numpy as np
 from torch.cuda.amp import autocast as autocast
+import torch.distributed as dist
 import pdb
 
 
@@ -36,6 +37,7 @@ class sflmoco_simulator(base_simulator):
             self.s_instance = create_sflmocoserver_instance(self.model.cloud, 
                                                             self.prototypes,
                                                             criterion, 
+                                                            self.device,
                                                             args, 
                                                             self.model.get_smashed_data_size(1, args.data_size), 
                                                             feature_sharing=args.feature_sharing)
@@ -46,6 +48,21 @@ class sflmoco_simulator(base_simulator):
             
             if args.cos:
                 self.s_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.s_optimizer, self.num_epoch)  # learning rate decay 
+            elif args.use_swav_scheduler:
+                print("testttttttttttttttttttttttttttttttttttttttttttttt")
+                warmup_lr_schedule = np.linspace(args.start_warmup, args.lr, len(train_loader[0]) * args.warmup_epochs)
+                iters = np.arange(len(train_loader[0]) * (args.num_epoch - args.warmup_epochs))
+                cosine_s_lr_schedule = np.array([args.final_s_lr + 
+                                               0.5 * (args.lr - args.final_s_lr) * (1 + \
+                         math.cos(math.pi * t / (len(train_loader[0]) * (args.num_epoch - args.warmup_epochs)))) for t in iters])
+                self.s_lr_schedule = np.concatenate((warmup_lr_schedule, cosine_s_lr_schedule))
+                print(f"s_scheduler:{self.s_lr_schedule}")
+                warmup_c_lr_schedule = np.linspace(args.start_warmup, args.c_lr, len(train_loader[0]) * args.warmup_epochs)
+                cosine_c_lr_schedule = np.array([args.final_c_lr + 
+                                               0.5 * (args.c_lr - args.final_c_lr) * (1 + \
+                         math.cos(math.pi * t / (len(train_loader[0]) * (args.num_epoch - args.warmup_epochs)))) for t in iters])
+                self.c_lr_schedule = np.concatenate((warmup_c_lr_schedule, cosine_c_lr_schedule))
+                print(f"c_scheduler:{self.c_lr_schedule}")
             else:
                 milestones = [int(0.6*self.num_epoch), int(0.8*self.num_epoch)]
                 self.s_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.s_optimizer, milestones=milestones, gamma=0.1)  # learning rate decay 
@@ -398,10 +415,10 @@ class sflmoco_simulator(base_simulator):
         return test_acc_1
 
 class create_sflmocoserver_instance(create_base_instance):
-    def __init__(self, model, prototypes, criterion, args, server_input_size = 1, feature_sharing = True) -> None:
+    def __init__(self, model, prototypes, criterion, device, args, server_input_size = 1, feature_sharing = True) -> None:
         super().__init__(model)
         self.criterion = criterion
-        self.device = args.device
+        self.device = device
         self.t_model = copy.deepcopy(model) 
         # 这是创建server_instance的类，传入的model是server-side model
         self.prototypes = prototypes
@@ -540,11 +557,13 @@ class create_sflmocoserver_instance(create_base_instance):
 
         # make the matrix sums to 1
         sum_Q = torch.sum(Q)
+        dist.all_reduce(sum_Q)
         Q /= sum_Q
 
         for it in range(sinkhorn_iterations):
             # normalize each row: total weight per prototype must be 1/K
             sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            dist.all_reduce(sum_of_rows)
             Q /= sum_of_rows
             Q /= K
 
@@ -952,7 +971,7 @@ class create_sflmocoserver_instance(create_base_instance):
 
                 loss_i = loss_i / len(crops_for_assign) # 默认情况下crops_for_assign==[0,1]
                 total_loss = total_loss + loss_i
-                pdb.set_trace()
+#                 pdb.set_trace()
             # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在反向传播前先将query_0的梯度清零
             if query_0.grad is not None:
                 query_0.grad.zero_() 

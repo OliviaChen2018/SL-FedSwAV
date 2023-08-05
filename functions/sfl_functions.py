@@ -142,7 +142,7 @@ def client_backward(sfl_simulator, pool, gradient_dict):
         sfl_simulator.c_optimizer_list[client_id].step()
         sfl_simulator.c_scheduler_list[client_id].step()
         
-def client_backward_swav(sfl_simulator, pool, gradient_dict, use_fp16 = False, scaler=None):
+def client_backward_swav(sfl_simulator, pool, gradient_dict, use_fp16 = False, scaler=None, use_swav_scheduler = False):
     for i, client_id in enumerate(pool):
 #         pdb.set_trace()
         sfl_simulator.c_instance_list[client_id].backward(gradient_dict[i])
@@ -150,7 +150,8 @@ def client_backward_swav(sfl_simulator, pool, gradient_dict, use_fp16 = False, s
             scaler.step(sfl_simulator.c_optimizer_list[client_id])
         else:
             sfl_simulator.c_optimizer_list[client_id].step()
-        sfl_simulator.c_scheduler_list[client_id].step()
+        if not use_swav_scheduler:
+            sfl_simulator.c_scheduler_list[client_id].step()
     if use_fp16: #在所有client的优化器都更新之后,再更新scaler
         scaler.update()
 

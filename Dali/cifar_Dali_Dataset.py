@@ -16,6 +16,8 @@ import torch
 from torch.utils.data import IterableDataset
 from Dali.load_cifar10_data import *
 from Dali.Dali_Dataloader import DALIDataloader
+# from load_cifar10_data import *
+# from Dali_Dataloader import DALIDataloader
 import time
 import math
 

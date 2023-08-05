@@ -73,7 +73,7 @@ class base_simulator:
         return images, labels #由于遍历的是pairloader，所以images和labels为正例对两个augmented images。
     
     # FedSwav
-    def next_swavdata_batch(self, client_id, use_dali):
+    def next_swavdata_batch(self, client_id, use_dali, epoch = 0, local_rank=0, world_size=1):
         try: 
             images = next(self.client_iterator_list[client_id]) # images是个list，其中包含2+6个crops
 #             pdb.set_trace()
@@ -87,13 +87,17 @@ class base_simulator:
                     next(self.client_iterator_list[client_id])
                 except StopIteration:
                     pass
+                self.client_dataloader[client_id].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
+                self.client_dataloader[client_id]._ever_consumed = False
                 self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
                 # create_iterator函数好像很多余，直接
                 # self.client_iterator_list[client_id] = iter((self.client_dataloader[client_id]))感觉也可以？
                 # self.client_dataloader== train_loader ==  get_cifar10_pairloader
                 images = next(self.client_iterator_list[client_id])
         except StopIteration: # 如果已经取完了，就从头开始取。
-            self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
+            self.client_dataloader[client_id].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
+            self.client_dataloader[client_id]._ever_consumed = False
+            self.client_iterator_list[client_id] = create_iterator(iter(self.client_dataloader[client_id]))
             images = next(self.client_iterator_list[client_id])
 #         print(f"读取下一批的数据长度为{len(images.size())}")
         return images 
@@ -105,6 +109,7 @@ class base_simulator:
         if self.c_optimizer_list: 
             for i in range(self.num_client):
                 self.c_optimizer_list[i].zero_grad()
+
 
     def fedavg(self, pool = None, divergence_aware = False, divergence_measure = False):
         # 参数divergence_measure的作用：判断是否计算divergence

@@ -57,3 +57,6 @@
 2. examples.py文件为Github( https://github.com/NVIDIA/DALI/issues/1356 )上的sampler的实现模板.(灵感来源)
 3. Dali/test_DDP.py为测试文件, 包含了在DaliDataloader方式下以DDP方式训练resnet模型完成cifar10分类任务的全过程. 
 4. 下一步计划将DDP写入我的模型中.
+
+2023.8.5
+1. 将我的模型的数据读取过程改为使用DDP-Dali的方式.

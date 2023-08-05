@@ -27,6 +27,7 @@ def get_sfl_args():
     parser.add_argument('--aux_data', type=str, default='cifar100', help='used only in expert_target_aware, as auxiliary dataset, choose from cifar10, cifar100, imagenet')
     parser.add_argument('--num_class', type=int, default=10, help="number of classes: N")
     parser.add_argument('--num_epoch', type=int, default=200)
+    parser.add_argument('--warmup_epochs', type=int, default=10)
     parser.add_argument('--seed', type=int, default=1234)
     parser.add_argument('--num_workers', type=int, default=4, help="Dataloader的进程数")
     parser.add_argument('--batch_size', type=int, default=128)
@@ -34,6 +35,12 @@ def get_sfl_args():
     parser.add_argument('--output_dir', type=str, default='./outputs/')
     parser.add_argument('--lr', type=float, default=0.05, help="server-side model learning rate")
     parser.add_argument('--c_lr', type=float, default=-1.0, help="client-side model learning rate")
+#     parser.add_argument('--base_s_lr', type=float, default=4, help="client-side model learning rate")
+    parser.add_argument('--final_s_lr', type=float, default=0, help="client-side model learning rate")
+#     parser.add_argument('--base_c_lr', type=float, default=1, help="client-side model learning rate")
+    parser.add_argument('--final_c_lr', type=float, default=0, help="client-side model learning rate")
+    parser.add_argument('--use_swav_scheduler', action='store_true', default=False, help="if use swav scheduler")
+    parser.add_argument("--start_warmup", default=0, type=float, help="initial warmup learning rate")
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--resume', action='store_true', default=False, help="resume from checkpoint")
@@ -172,27 +179,27 @@ def get_sfl_args():
     '''Pre-fix moco version settings '''
     if args.moco_version == "V1":
         args.mlp = False
-        args.cos = False
+#         args.cos = False
         args.K_dim = 128
         args.pairloader_option = "mocov1"
         args.CLR_option = "multistep"
     elif args.moco_version == "smallV2":
         args.mlp = True # use extra MLP head
-        args.cos = True # set cos annearling learning rate decay to true
+#         args.cos = True # set cos annearling learning rate decay to true
         args.K_dim = 512
         args.pairloader_option = "mocov2"
         args.symmetric = True
         args.CLR_option = "cos"
     elif args.moco_version == "V2":
         args.mlp = True # use extra MLP head
-        args.cos = True # set cos annearling learning rate decay to true
+#         args.cos = True # set cos annearling learning rate decay to true
         args.K_dim = 1024
         args.pairloader_option = "mocov2"
         args.symmetric = True
         args.CLR_option = "cos"
     elif args.moco_version == "largeV2": #we adopt the baseline's setting (https://arxiv.org/pdf/2204.04385.pdf)
         args.mlp = True # use extra MLP head
-        args.cos = True # set cos annearling learning rate decay to true
+#         args.cos = True # set cos annearling learning rate decay to true
         args.K_dim = 2048
         args.pairloader_option = "mocov2"
         args.symmetric = True

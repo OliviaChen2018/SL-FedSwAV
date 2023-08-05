@@ -4,7 +4,11 @@ cd ../../
 
 #fixed arguments
 num_epoch=200
-lr=0.006
+lr=0.000005
+final_s_lr=0.000001
+c_lr=0.000005
+final_c_lr=0.000001
+warmup_epochs=0
 moco_version=V2
 arch=ResNet18
 non_iid_list="1.0"
@@ -19,15 +23,17 @@ avg_freq=10
 device='cuda:5'
 queue_length=3840
 aug_type='swav'
+freeze_prototypes_niters=1000
 for num_client in $num_client_list; do
         for noniid_ratio in $non_iid_list; do
                 for cutlayer in $cutlayer_list; do
                         output_dir="./outputs/SwavSfl${moco_version}_${arch}_${dataset}_cut${cutlayer}_bnl${bottleneck_option}_client${num_client}_nonIID${noniid_ratio}_dirichlet"
                         torchrun --nproc_per_node=4 run_sflswav.py\
-                                --num_client ${num_client} --lr ${lr} --cutlayer ${cutlayer} --num_epoch ${num_epoch}\
+                                --num_client ${num_client} --cutlayer ${cutlayer} --num_epoch ${num_epoch}\
                                 --nmb_crops 2 6 --size_crops 224 96 --min_scale_crops 0.14 0.05 --max_scale_crops 1 0.14\
-                                --use_dali --use_fp16 --is_distributed\
-                                --queue_length ${queue_length}\
+                                --use_dali --is_distributed --cos\
+                                 --lr ${lr} --final_s_lr ${final_s_lr} --c_lr ${c_lr} --final_c_lr ${final_c_lr} --warmup_epochs ${warmup_epochs}\
+                                --queue_length ${queue_length} --freeze_prototypes_niters ${freeze_prototypes_niters}\
                                 --noniid_ratio ${noniid_ratio}  --hetero --output_dir ${output_dir}\
                                 --moco_version ${moco_version} --arch ${arch} --dataset ${dataset} --loss_threshold ${loss_threshold}\
                                 --ressfl_alpha ${ressfl_alpha} --bottleneck_option ${bottleneck_option} --batch_size ${batch_size}\
@@ -36,4 +42,4 @@ for num_client in $num_client_list; do
         done
 done
 ## for test, add --resume --attack
-##  
+##  --use_fp16  --use_swav_scheduler

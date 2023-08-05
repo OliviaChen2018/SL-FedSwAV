@@ -206,9 +206,8 @@ def get_cifar10_dali_DDP(size_crops=None, nmb_crops=None, min_scale_crops=None, 
                                                               min_scale_crops=min_scale_crops,
                                                               max_scale_crops=max_scale_crops, 
                                                               world_size=world_size, 
-                                                              local_rank=local_rank, 
-                                                              cutout=cutout,
-                                                              train = train)
+                                                              local_rank=local_rank,
+                                                              train = True)
                 dataloader = DALIDataloader(sampler, 
                                           pipeline=pip_train, 
                                           size=sampler.len() / world_size,
