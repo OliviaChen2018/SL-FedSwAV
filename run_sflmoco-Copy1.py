@@ -15,17 +15,14 @@ from models.resnet import init_weights
 from functions.sflmoco_functions import sflmoco_simulator
 from functions.sfl_functions import client_backward, loss_based_status
 from functions.attack_functions import MIA_attacker, MIA_simulator
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 import gc
-import os
 VERBOSE = False
 #get default args
 args = get_sfl_args()
 set_deterministic(args.seed)
 
 if args.is_distributed :
-    os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5" # SflMoco
+    os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5"
     local_rank = int(os.environ["LOCAL_RANK"]) 
     print(f"local_rank: {local_rank}\n")
     world_size = int(os.environ["WORLD_SIZE"]) 
@@ -43,6 +40,10 @@ else:
 #get data
 create_dataset = getattr(datasets, f"get_{args.dataset}")
 train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
+    args.size_crops, 
+    args.nmb_crops, 
+    args.min_scale_crops, 
+    args.max_scale_crops, 
     batch_size=args.batch_size,
     num_workers=args.num_workers, 
     shuffle=True, 
@@ -118,12 +119,26 @@ if args.is_distributed:
 else:
     sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args)
 
-# if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
-# #     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
-#     sfl.cuda(args.device)
-# else:
-#     sfl.cpu()
-# sfl.s_instance.cuda(args.device)
+'''Initialze with ResSFL resilient model '''  # resilient model是什么？
+if args.initialze_path != "None":
+    sfl.log("Load from resilient model, train with client LR of {}".format(args.c_lr))
+    sfl.load_model_from_path(args.initialze_path, load_client = True, load_server = args.load_server)
+    args.attack = True
+
+if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
+#     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
+    sfl.cuda(args.device)
+else:
+    sfl.cpu()
+sfl.s_instance.cuda(args.device)
+
+'''ResSFL training''' 
+if args.enable_ressfl: # 这一部分暂时没用
+    sfl.log(f"Enable ResSFL fine-tuning: arch-{args.MIA_arch}-alpha-{args.ressfl_alpha}-ssim-{args.ressfl_target_ssim}")
+    ressfl = MIA_simulator(sfl.model, args, args.MIA_arch)
+#     ressfl.cuda()
+    ressfl.cuda(args.device)
+    args.attack = True
 
 sfl.log(f'Data statistics: {str(traindata_cls_counts)}')
     
@@ -176,9 +191,9 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                     query, pkey = sfl.next_data_batch(client_id) 
                     #获得第client_id个client的train_data，即augmented images正例对的两个batch
                     query_num[i] = query.size(0)
-#                     if args.cutlayer > 1:
-                    query = query.to(device)
-                    pkey = pkey.to(device)
+                    if args.cutlayer > 1:
+                        query = query.to(args.device)
+                        pkey = pkey.to(args.device)
                     hidden_query = sfl.c_instance_list[client_id](query)# pass to online  
                     #是不是应该.detach()啊？client的forward函数的返回值已经做了detach了。
                     # 使用client-side部分对aug1进行表征
@@ -202,16 +217,12 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 stack_hidden_query = torch.load(f"replay_tensors/stack_hidden_query_{shuffle_map[batch]}.pt")
                 stack_hidden_pkey = torch.load(f"replay_tensors/stack_hidden_pkey_{shuffle_map[batch]}.pt")
             
-            stack_hidden_query = stack_hidden_query.to(device)
-            stack_hidden_pkey = stack_hidden_pkey.to(device)
-#             print(f"stack_hidden_query的device: {device}")
+            stack_hidden_query = stack_hidden_query.to(args.device)
+            stack_hidden_pkey = stack_hidden_pkey.to(args.device)
 
             sfl.s_optimizer.zero_grad()
-    
             #server compute
-#             loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
-
-            loss, gradient, accu = sfl.s_instance.compute_simco(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size)
+            loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
 
             sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
@@ -221,8 +232,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             avg_accu += accu
 
             # distribute gradients to clients
-#             if args.cutlayer <= 1:
-#                 gradient = gradient.cpu()
+            if args.cutlayer <= 1:
+                gradient = gradient.cpu()
 
             if loss_status.status == "A": # loss大于某个阈值的时候才更新client-side models
                 # Initialize clients' queue, to store partial gradients
@@ -250,6 +261,19 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #                         else:
 #                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
 #                             start_grad_idx += args.batch_size
+                
+                if args.enable_ressfl:
+                    for i, client_id in enumerate(pool): # if distributed, this can be parallelly done.
+                        # let's use the query to train the AE
+                        gan_train_loss = ressfl.train(client_id, hidden_query, query)
+                        #client attacker-aware training loss
+                        gan_eval_loss, gan_grad = ressfl.regularize_grad(client_id, hidden_query, query)
+
+                        if gan_grad is not None:
+                            gradient_dict[j] += gan_grad
+
+                        avg_gan_train_loss += gan_train_loss
+                        avg_gan_eval_loss += gan_eval_loss
 
                 #client backward
                 client_backward(sfl, pool, gradient_dict) # 各client以自己的gradient进行反向传播
@@ -273,17 +297,23 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 
         avg_accu = avg_accu / num_batch # avg_accu是一个epoch中所有batch的对比acc的batch平均
         avg_loss = avg_loss / num_batch # avg_loss是一个epoch中所有batch的对比loss的batch平均
+        if args.enable_ressfl:
+            avg_gan_train_loss = avg_gan_train_loss / num_batch / len(pool)
+            avg_gan_eval_loss = avg_gan_eval_loss / num_batch / len(pool)
         
         loss_status.record_loss(epoch, avg_loss) # 更新loss的状态
         
         knn_val_acc = sfl.knn_eval(memloader=mem_loader) # 每个epoch计算一次knn_acc。
         # mem_loader被用于KNN分类中的已知类别的样本点集合（是一个DataLoader的list）
-#         if args.cutlayer <= 1:
-#             sfl.c_instance_list[0].cpu()
+        if args.cutlayer <= 1:
+            sfl.c_instance_list[0].cpu()
         if knn_val_acc > knn_accu_max:  # 用knn_accu_max保存最优acc，并保存knn准确率最高时的最优模型(包括server-side model和第0个client-side model)。
             knn_accu_max = knn_val_acc
-#             sfl.save_model(epoch, is_best = True) # (base_funtions.py)
+            sfl.save_model(epoch, is_best = True) # (base_funtions.py)
         epoch_logging_msg = f"epoch:{epoch}, knn_val_accu: {knn_val_acc:.2f}, contrast_loss: {avg_loss:.2f}, contrast_acc: {avg_accu:.2f}" # contrast_acc：正例对的logits比负例对的logits高则正确
+        
+        if args.enable_ressfl:
+            epoch_logging_msg += f", gan_train_loss: {avg_gan_train_loss:.2f}, gan_eval_loss: {avg_gan_eval_loss:.2f}"
         
         sfl.log(epoch_logging_msg)
         gc.collect()

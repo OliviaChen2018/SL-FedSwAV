@@ -4,11 +4,11 @@ cd ../../
 
 #fixed arguments
 num_epoch=200
-lr=0.000005
+lr=0.5
 final_s_lr=0.000001
-c_lr=0.000005
-final_c_lr=0.000001
-warmup_epochs=0
+c_lr=0.5
+final_c_lr=0.0001
+warmup_epochs=3
 moco_version=V2
 arch=ResNet18
 non_iid_list="1.0"
@@ -21,7 +21,7 @@ bottleneck_option=None
 batch_size=2
 avg_freq=10
 device='cuda:5'
-queue_length=3840
+K=3840
 aug_type='swav'
 freeze_prototypes_niters=1000
 for num_client in $num_client_list; do
@@ -31,9 +31,9 @@ for num_client in $num_client_list; do
                         torchrun --nproc_per_node=4 run_sflswav.py\
                                 --num_client ${num_client} --cutlayer ${cutlayer} --num_epoch ${num_epoch}\
                                 --nmb_crops 2 6 --size_crops 224 96 --min_scale_crops 0.14 0.05 --max_scale_crops 1 0.14\
-                                --use_dali --is_distributed --cos\
+                                 --is_distributed \
                                  --lr ${lr} --final_s_lr ${final_s_lr} --c_lr ${c_lr} --final_c_lr ${final_c_lr} --warmup_epochs ${warmup_epochs}\
-                                --queue_length ${queue_length} --freeze_prototypes_niters ${freeze_prototypes_niters}\
+                                --K ${K} --freeze_prototypes_niters ${freeze_prototypes_niters}\
                                 --noniid_ratio ${noniid_ratio}  --hetero --output_dir ${output_dir}\
                                 --moco_version ${moco_version} --arch ${arch} --dataset ${dataset} --loss_threshold ${loss_threshold}\
                                 --ressfl_alpha ${ressfl_alpha} --bottleneck_option ${bottleneck_option} --batch_size ${batch_size}\
@@ -42,4 +42,4 @@ for num_client in $num_client_list; do
         done
 done
 ## for test, add --resume --attack
-##  --use_fp16  --use_swav_scheduler
+##  --use_fp16   --cos--use_swav_scheduler --epsilon ${epsilon}--use_dali

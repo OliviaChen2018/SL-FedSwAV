@@ -52,11 +52,11 @@ def denormalize(x, dataset): # normalize a zero mean, std = 1 to range [0, 1]
     return torch.clamp(tensor, 0, 1).permute(3, 0, 1, 2)
 
 
-def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale_crops=None, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', aug_type = None, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale_crops=None, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', aug_type = None, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data", is_distributed = False):
     if pairloader_option != "None":
         if data_proportion > 0.0:
             if aug_type == "swav":
-                train_loader, traindata_cls_counts = get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, hetero_string, path_to_data)
+                train_loader, traindata_cls_counts = get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, hetero_string, path_to_data, is_distributed)
             else:
             # train_loader用于contrastive fl的训练, 是一个包含所有client train_dataloader的list；
             # test_loader用于validate
@@ -242,7 +242,7 @@ def get_cifar100_pairloader(batch_size=16, num_workers=2, shuffle=True, num_clie
     
     return cifar100_training_loader
 
-def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition = 'noniid', hetero = False, path_to_data = "./data"):
+def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition = 'noniid', hetero = False, path_to_data = "./data", is_distributed=False):
     class CIFAR10Pair(torchvision.datasets.CIFAR10):
         """CIFAR10 Dataset. CIFAR10Pair类返回的是一个Dataset类型的变量
         """
@@ -309,13 +309,13 @@ def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True,
     # data表示数据集中的所有样本值，target表示样本标签。
 #     print(len(train_target))
     
-    cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4)
+    cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4, is_distributed=is_distributed)
     
 #     cifar10_training_loader = get_multiclient_trainloader_list(train_data, num_client, shuffle, num_workers, batch_size, noniid_ratio, 10, hetero, hetero_string)
     
     return cifar10_training_loader, traindata_cls_counts
 
-def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition='non-iid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition='non-iid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data", is_distributed=False):
 #     print("MultiCropCifar10Dataset")
     train_data = MultiCropCifar10Dataset(
         path_to_data, 
@@ -329,7 +329,7 @@ def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops
 #     pdb.set_trace()
     target = np.array(train_data.targets)
     
-    cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4)
+    cifar10_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=10, partition = partition, beta=0.4, is_distributed=is_distributed)
     
 #     cifar10_training_loader = get_multiclient_trainloader_list(train_data, num_client, shuffle, num_workers, batch_size, noniid_ratio, 10, hetero, hetero_string)
     

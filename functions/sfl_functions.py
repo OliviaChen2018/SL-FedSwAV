@@ -26,7 +26,7 @@ class sfl_simulator(base_simulator):
         self.c_instance_list = []
         for i in range(args.num_client):
             self.c_instance_list.append(create_sflclient_instance(self.model.local_list[i]))
-
+            
         # Set optimizer
         self.s_optimizer = torch.optim.SGD(list(self.s_instance.model.parameters()), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
         self.c_optimizer_list = [None for i in range(args.num_client)]

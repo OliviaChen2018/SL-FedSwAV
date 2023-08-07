@@ -20,12 +20,14 @@ from models.resnet import init_weights
 from utils import AverageMeter, accuracy
 import numpy as np
 from torch.cuda.amp import autocast as autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+# from torch.nn.SyncBatchNorm import convert_sync_batchnorm as SyncBN
 import pdb
 
 
 class sflmoco_simulator(base_simulator):
-    def __init__(self, model, criterion, train_loader, test_loader, device, args) -> None:
+    def __init__(self, model, criterion, train_loader, test_loader, args, device, local_rank, is_distributed=False) -> None:
         super().__init__(model, criterion, train_loader, test_loader, device, args)
         
         # Create server instances
@@ -41,10 +43,21 @@ class sflmoco_simulator(base_simulator):
                                                             args, 
                                                             self.model.get_smashed_data_size(1, args.data_size), 
                                                             feature_sharing=args.feature_sharing)
-            self.s_optimizer = torch.optim.SGD(list(self.s_instance.model.parameters()), 
+            if is_distributed:
+                self.s_instance.cuda(device)
+                self.s_instance.prototypes.to(device)
+                self.s_instance.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.s_instance.model).to(device)
+                self.s_instance.model = DDP(self.s_instance.model, device_ids=[local_rank], output_device=local_rank)
+                self.s_instance.prototypes = DDP(self.s_instance.prototypes, device_ids=[local_rank], output_device=local_rank)
+            self.s_optimizer = torch.optim.SGD(list(self.s_instance.model.parameters())
+                                               +list(self.s_instance.prototypes.parameters()), 
                                                lr=args.lr, 
                                                momentum=args.momentum, 
                                                weight_decay=args.weight_decay)
+#             self.prototype_optimizer = torch.optim.SGD(list(self.prototypes.parameters()), 
+#                                                lr=args.lr, 
+#                                                momentum=args.momentum, 
+#                                                weight_decay=args.weight_decay)
             
             if args.cos:
                 self.s_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.s_optimizer, self.num_epoch)  # learning rate decay 
@@ -57,12 +70,15 @@ class sflmoco_simulator(base_simulator):
                          math.cos(math.pi * t / (len(train_loader[0]) * (args.num_epoch - args.warmup_epochs)))) for t in iters])
                 self.s_lr_schedule = np.concatenate((warmup_lr_schedule, cosine_s_lr_schedule))
                 print(f"s_scheduler:{self.s_lr_schedule}")
+                
                 warmup_c_lr_schedule = np.linspace(args.start_warmup, args.c_lr, len(train_loader[0]) * args.warmup_epochs)
                 cosine_c_lr_schedule = np.array([args.final_c_lr + 
                                                0.5 * (args.c_lr - args.final_c_lr) * (1 + \
                          math.cos(math.pi * t / (len(train_loader[0]) * (args.num_epoch - args.warmup_epochs)))) for t in iters])
                 self.c_lr_schedule = np.concatenate((warmup_c_lr_schedule, cosine_c_lr_schedule))
                 print(f"c_scheduler:{self.c_lr_schedule}")
+                
+                
             else:
                 milestones = [int(0.6*self.num_epoch), int(0.8*self.num_epoch)]
                 self.s_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.s_optimizer, milestones=milestones, gamma=0.1)  # learning rate decay 
@@ -73,7 +89,13 @@ class sflmoco_simulator(base_simulator):
             self.c_instance_list.append(create_sflmococlient_instance(self.model.local_list[i]))
 
         self.c_optimizer_list = [None for i in range(args.num_client)]
+        
         for i in range(args.num_client):
+            if is_distributed:
+                self.c_instance_list[i].cuda(device)
+                self.c_instance_list[i].model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.c_instance_list[i].model).to(device)
+                self.c_instance_list[i].model = DDP(self.c_instance_list[i].model, device_ids=[local_rank], output_device=local_rank)
+                
             self.c_optimizer_list[i] = torch.optim.SGD(list(self.c_instance_list[i].model.parameters()), lr=args.c_lr, momentum=args.momentum, weight_decay=args.weight_decay)
         
         self.c_scheduler_list = [None for i in range(args.num_client)]
@@ -440,7 +462,8 @@ class create_sflmocoserver_instance(create_base_instance):
             #队列的初值为随机值（这个队列是横着的，每个feature是竖着的）
 #             self.queue = nn.functional.normalize(self.queue, dim=1) # 对队列中的每个列向量标准化
 #             pdb.set_trace()
-            self.queue = torch.zeros(len(args.crops_for_assign), args.K_dim, self.K).to(self.device) 
+#             self.queue = torch.zeros(len(args.crops_for_assign), args.K_dim, self.K).to(self.device) 
+            self.queue = torch.zeros(len(args.crops_for_assign), self.K, args.K_dim,).to(self.device) 
             self.queue_ptr = torch.zeros(2, dtype=torch.long) #queue_ptr表示队列的指针，初值为[0]
         else: # 如果不进行特征聚合共享，则每个client都维护一个自己的队列
             self.K = self.K // self.num_client #将总队列容量均匀分给每个client的队列
@@ -485,9 +508,11 @@ class create_sflmocoserver_instance(create_base_instance):
                 # 队列中还有self.K-ptr个空位置，则只放keys中的前self.K-ptr个features入队
                 self.queue[crop_index, :, 0:(batch_size + ptr - self.K)] = keys.T[:, self.K - ptr:]
                 # 按先进先出原则，将队首的self.K-ptr个位置用于存放keys中剩下的features(循环队列的结构)
+                print(f"queue已满, ptr指到{batch_size + ptr - self.K}")
             ptr = (ptr + batch_size) % self.K  # move pointer，指针指到当前队尾(即keys中最后一个feature所在的位置)
 
-            self.queue_ptr[crop_index][0] = ptr # 保存指针位置(queue_ptr中只有一个元素)
+            self.queue_ptr[crop_index] = ptr # 保存指针位置(queue_ptr中只有一个元素)
+#             print(f"当前指针位置:{ptr}")
             
 
     @torch.no_grad()
@@ -838,21 +863,28 @@ class create_sflmocoserver_instance(create_base_instance):
 #         return error, gradient
     
     
-    def compute_swav(self, client_embedding_list, crops_for_assign, nmb_crops, temperature, epsilon, sinkhorn_iterations, enqueue = True, pool = None, use_fp16=False, scaler = None):
+    def compute_swav(self, client_embedding_list, crops_for_assign, nmb_crops, temperature, epsilon, sinkhorn_iterations, world_size=1, enqueue = True, pool = None, use_fp16=False, scaler = None, is_distributed=False):
         # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
         # client_embedding是两个tensor组成的list
         
 #         print(f"server-side prototypes：{self.model}")
         # normalize the prototypes
         with torch.no_grad():
-            w = self.prototypes.weight.data.clone()
-            w = nn.functional.normalize(w, dim=1, p=2)
-            self.prototypes.weight.copy_(w)
-        self.prototypes.to(self.device)
+            if is_distributed:
+                w = self.prototypes.module.weight.data.clone()
+                w = nn.functional.normalize(w, dim=1, p=2)
+                self.prototypes.module.weight.copy_(w)
+            else:
+                w = self.prototypes.weight.data.clone()
+                w = nn.functional.normalize(w, dim=1, p=2)
+                self.prototypes.weight.copy_(w)
+#         self.prototypes.to(self.device)
         
         bs = []
         query_0 = []
         query_1 = []
+        count_bs_0 = [0]
+        count_bs_1 = [0]
         # 先将所有client的embedding合并为一个tensor
         for client_index, client_id in enumerate(pool):
             query_i_list = client_embedding_list[client_index] # query_i_list是两个tensor组成的list
@@ -865,21 +897,16 @@ class create_sflmocoserver_instance(create_base_instance):
                     query_1.append(query_i_list[crop_id].detach() )
                 else: # 如果multi-crop做了3种size及以上的增强
                     pass
+            count_bs_0.append(count_bs_0[client_index] + bs[client_index]*nmb_crops[0])
+            count_bs_1.append(count_bs_1[client_index] + bs[client_index]*nmb_crops[1])
                     
         query_0 = torch.cat(query_0, dim=0) #size==[B*num_crops[0]*len(pool), args.K_dim]
         query_0.requires_grad=True
         query_0.retain_grad()
         query_1 = torch.cat(query_1, dim=0) #size==[B*num_crops[1]*len(pool), args.K_dim]
         
-        count_bs_0 = [0]
-        count_bs_1 = [0]
-        for i in range(len(pool)):
-            count_bs_0.append(count_bs_0[i] + bs[i]*nmb_crops[0])
-            count_bs_1.append(count_bs_1[i] + bs[i]*nmb_crops[1])
-        
         # ============ swav loss ... ============
         # 计算两类增强样本的进一步表征
-        
         if use_fp16:
             with autocast():
 #                 pdb.set_trace()
@@ -904,8 +931,9 @@ class create_sflmocoserver_instance(create_base_instance):
                             if self.queue is not None:
                                 if self.use_the_queue or not torch.all(self.queue[queue_i, :, -1]==0):
                                     self.use_the_queue=True
+                                    print(f"使用queue")
                                     score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.weight.t()), score))
-                                    self._dequeue_and_enqueue_swav(embedding, queue_i, pool) # 更新队列
+                                self._dequeue_and_enqueue_swav(embedding, queue_i, pool) # 更新队列
 
                             q = self.distributed_sinkhorn(score, epsilon, sinkhorn_iterations)[-bs_i:] #assign
                         
@@ -934,9 +962,11 @@ class create_sflmocoserver_instance(create_base_instance):
 
         else:
             embedding_0 = self.model(query_0.to(self.device, non_blocking=True))
+            embedding_0 = nn.functional.normalize(embedding_0, dim=1, p=2)
             # 用prototypes层处理，计算两类增强样本表征的分类scores。
             score_0 = self.prototypes(embedding_0) #用prototypes层处理，得到所有表征的分类scores。
             score_1 = self.model(query_1.to(self.device))
+            score_1 = nn.functional.normalize(score_1, dim=1, p=2)
             score_1 = self.prototypes(score_1)
 
             loss_i = 0 # 第i个client的loss
@@ -950,10 +980,25 @@ class create_sflmocoserver_instance(create_base_instance):
                         embedding = embedding_0[begin_i_index_0 + bs_i * crop_id : begin_i_index_0 + bs_i * (crop_id + 1)]
                         score = score_0[begin_i_index_0  + bs_i * crop_id: begin_i_index_0 + bs_i * (crop_id + 1)].detach()
                         if self.queue is not None:
+#                             print(f"判断条件:{torch.all(self.queue[queue_i, :, -1]==0)}")
                             if self.use_the_queue or not torch.all(self.queue[queue_i, :, -1]==0):
+#                             if self.use_the_queue or self.queue_ptr[0] >= 3832:
+#                                 print(f"use queue")
                                 self.use_the_queue=True
-                                score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.weight.t()), score))
-                                self._dequeue_and_enqueue_swav(embedding, queue_i, pool) # 更新队列
+#                                 if self.queue_ptr[0]==0:
+#                                     print(f"使用queue")
+#                                 print(f"prototypes的参数:{self.prototypes.weight}")
+                                if is_distributed:
+#                                     score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.module.weight.t()), score))
+                                    score = torch.cat((torch.mm(self.queue[queue_i], self.prototypes.module.weight.t()), score))
+                                else:
+                                    score = torch.cat((torch.mm(self.queue[queue_i].t(), self.prototypes.weight.t()), score))
+                            embedding_all = torch.zeros(world_size*embedding.size(0), embedding.size(1), device=self.device)
+                            dist.all_gather_into_tensor(embedding_all, embedding)
+#                             print(f"embedding的size:{embedding_all.size()}")
+#                             self._dequeue_and_enqueue_swav(embedding_all, queue_i) # 更新队列
+                            self.queue[queue_i, bs_i*world_size:] = self.queue[queue_i, :-bs_i*world_size].clone() # 将queue中的数据整体向右移bs个位置.
+                            self.queue[queue_i, :bs_i*world_size] = embedding_all
 
                         q = self.distributed_sinkhorn(score, epsilon, sinkhorn_iterations)[-bs_i:] #assign
 

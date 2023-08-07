@@ -33,7 +33,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5"
 
 '''Preparing'''
 #get data
-if args.is_distributed:
+if args.is_distributed :
     local_rank = int(os.environ["LOCAL_RANK"]) 
     print(f"local_rank: {local_rank}\n")
     world_size = int(os.environ["WORLD_SIZE"]) 
@@ -43,14 +43,34 @@ if args.is_distributed:
     torch.cuda.set_device(local_rank) # 设置device
     dist.init_process_group(backend='nccl')  # 初始化多进程. nccl是GPU设备上最快、最推荐的后端
     
+    if args.use_dali:
     # load data
-    train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali_DDP(
-        size_crops=args.size_crops, nmb_crops=args.nmb_crops, min_scale_crops=args.min_scale_crops, max_scale_crops=args.max_scale_crops, 
-        batch_size=args.batch_size, num_workers=args.num_workers, num_client = args.num_client, 
-        data_proportion = args.data_proportion, noniid_ratio =args.noniid_ratio, 
-        pairloader_option = args.pairloader_option, 
-        partition = args.partition, partition_beta = 0.4, hetero = args.hetero, 
-        path_to_data = args.data_dir, world_size = world_size, local_rank=local_rank)
+        train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali_DDP(
+            size_crops=args.size_crops, nmb_crops=args.nmb_crops, min_scale_crops=args.min_scale_crops, max_scale_crops=args.max_scale_crops, 
+            batch_size=args.batch_size, num_workers=args.num_workers, num_client = args.num_client, 
+            data_proportion = args.data_proportion, noniid_ratio =args.noniid_ratio, 
+            pairloader_option = args.pairloader_option, 
+            partition = args.partition, partition_beta = 0.4, hetero = args.hetero, 
+            path_to_data = args.data_dir, world_size = world_size, local_rank=local_rank)
+    else:
+        create_dataset = getattr(datasets, f"get_{args.dataset}")
+        train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
+            args.size_crops, 
+            args.nmb_crops, 
+            args.min_scale_crops, 
+            args.max_scale_crops, 
+            batch_size=args.batch_size,
+            num_workers=args.num_workers, 
+            shuffle=True, 
+            num_client = args.num_client, 
+            data_proportion = args.data_proportion, 
+            noniid_ratio = args.noniid_ratio, 
+            augmentation_option = True, 
+            pairloader_option = args.pairloader_option, 
+            aug_type = args.aug_type,
+            hetero = args.hetero, 
+            hetero_string = args.hetero_string,
+            is_distributed = args.is_distributed)
 
 elif args.use_dali is True:
     train_loader, traindata_cls_counts, mem_loader, test_loader = get_cifar10_dali(
@@ -91,7 +111,7 @@ else:
 # for data in train_loader[0]: 
 #     print(data.size())
 #train_loader里包含的是若干个clients的dataloader. 每个dataloader中包含增强样本数量个tensor,每个tensor的维度为[batch_size, 3, size_crop, size_crop]
-num_batch = len(train_loader[0]) # 将第0个client拥有数据的数量作为server-side model的训练epoch数。（即整个模型训练arg.num_epoch轮，每轮中server-side model训练num_batch个batch。每个batch中所有client计算自己数据的表征并将表征在server端聚合）
+num_batch = int(len(train_loader[0])/4) # 将第0个client拥有数据的数量作为server-side model的训练epoch数。（即整个模型训练arg.num_epoch轮，每轮中server-side model训练num_batch个batch。每个batch中所有client计算自己数据的表征并将表征在server端聚合）
 
 # resnet, vgg, MobileNetV2分别是./models/中的三个model文件。
 # e.g. args.arch== 'ResNet18'，
@@ -148,12 +168,12 @@ if args.mlp: # 只有moco V1的mlp是False
 # print(f"global_model的层\n{global_model}")
 global_model.merge_classifier_cloud() # 给模型加上mlp层（global_model的结果依然是对Input的表征）
 # 用于训练的整个线性层包括了MLP层
-global_model = nn.SyncBatchNorm.convert_sync_batchnorm(global_model)
+
 #get loss function
 criterion = nn.CrossEntropyLoss().to(device)
 
 #initialize sfl
-sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, device, args)
+sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args, device=device, local_rank=local_rank, is_distributed=args.is_distributed)
 
 sfl.log(args)
 
@@ -168,7 +188,7 @@ else:
 #     sfl.load_model_from_path(args.initialze_path, load_client = True, load_server = args.load_server)
 #     args.attack = True
 
-sfl.cuda(device)
+# sfl.cuda(device)
 # ###原来的sfl####
 # if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
 # #     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
@@ -221,6 +241,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 for param_group in sfl.s_optimizer.param_groups:
                     param_group["lr"] = sfl.s_lr_schedule[iteration]
 #                     sfl.log(f"epoch{epoch} s_scheduler:{sfl.s_lr_schedule[iteration]}")
+#                 for param_group in sfl.prototype_optimizer.param_groups:
+#                     param_group["lr"] = sfl.s_lr_schedule[iteration]
                 for client_index, client_id in enumerate(pool): 
                     for param_group in sfl.c_optimizer_list[client_index].param_groups:
                         param_group["lr"] = sfl.c_lr_schedule[iteration]
@@ -235,7 +257,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 bs = []
                 #client forward
                 for client_index, client_id in enumerate(pool): # if distributed, this can be parallelly done.
-                    images = sfl.next_swavdata_batch(client_id, args.use_dali, epoch, local_rank, world_size)  # images是个list，其中包含2+6个crops
+                    images = sfl.next_swavdata_batch(client_id, args.use_dali, epoch, local_rank, world_size, is_distributed=args.is_distributed)  # images是个list，其中包含2+6个crops
 #                     print(f"第{epoch}轮第{batch}个batch第{client_id}号client读取数据条数为{len(images)}")
                     if args.use_dali:
                         data = images['data']
@@ -282,6 +304,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #             stack_hidden_query = stack_hidden_query.to(device)
 
                 sfl.s_optimizer.zero_grad()
+#                 sfl.prototype_optimizer.zero_grad()
                 #server compute
     #             loss, gradient, accu = sfl.s_instance.compute(hidden_embedding_list, scores_list, pool = pool) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
 
@@ -294,19 +317,33 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                     temperature = args.temperature, 
                     epsilon = args.epsilon, 
                     sinkhorn_iterations = args.sinkhorn_iterations, 
+                    world_size=world_size,
                     pool = pool,
                     use_fp16 = args.use_fp16,
-                    scaler = scaler) 
+                    scaler = scaler, 
+                    is_distributed = args.is_distributed) 
 
 
 #                 print(f"epoch:{epoch}, batch:{batch}, client:{client_index}, loss:{loss}")
                 print(f"epoch:{epoch}, batch:{batch}, loss:{loss}")
 
                 if iteration < args.freeze_prototypes_niters:
-                    for name, p in global_model.named_parameters():
-                        if "prototypes" in name:
+                    if args.is_distributed:
+                        for name, p in sfl.s_instance.prototypes.module.named_parameters():
+    #                             print(f"prototypes的grad参数:{p.grad}")
                             p.grad = None
-
+                    else:
+                        for name, p in sfl.s_instance.prototypes.named_parameters():
+    #                             print(f"prototypes的grad参数:{p.grad}")
+                            p.grad = None
+                if iteration==100 or iteration==200 or iteration==300: # 看看prototypes到底更新了没
+                    for name, p in sfl.s_instance.prototypes.named_parameters():
+#                             print(f"prototypes的grad参数:{p.grad}")
+                        sfl.log(f"iter{iteration}, prototypes的参数:{p}")
+#                 if iteration >= args.freeze_prototypes_niters:
+#                     sfl.prototype_optimizer.step()
+    
+    
                 if args.use_fp16:
                     scaler.step(sfl.s_optimizer)
 #                     scaler.update()
@@ -362,13 +399,14 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
         loss_status.record_loss(epoch, avg_loss) # 更新loss的状态
 
         knn_val_acc = sfl.knn_eval(memloader=mem_loader, use_dali = args.use_dali) # 每个epoch计算一次knn_acc。
-        mem_loader[0].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
-        mem_loader[0]._ever_consumed = False # 防止train_loader自动调用.reset()函数
+        if args.use_dali:
+            mem_loader[0].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
+            mem_loader[0]._ever_consumed = False # 防止train_loader自动调用.reset()函数
         # mem_loader被用于KNN分类中的已知类别的样本点集合（是一个DataLoader的list）
 #         if args.cutlayer <= 1:
 #             sfl.c_instance_list[0].cpu()
-        sfl.validate_loader[0].reset(0, num_shards=world_size, shard_id=local_rank, shuffle = True)
-        sfl.validate_loader[0]._ever_consumed = False # 防止train_loader自动调用.reset()函数
+            sfl.validate_loader[0].reset(0, num_shards=world_size, shard_id=local_rank, shuffle = True)
+            sfl.validate_loader[0]._ever_consumed = False # 防止train_loader自动调用.reset()函数
         
         if knn_val_acc > knn_accu_max:  # 用knn_accu_max保存最优acc，并保存knn准确率最高时的最优模型(包括server-side model和第0个client-side model)。
             knn_accu_max = knn_val_acc
@@ -397,6 +435,8 @@ if args.loss_threshold > 0.0: #如果使用降级策略
 val_acc = sfl.knn_eval(memloader=mem_loader, use_dali = args.use_dali)
 sfl.log(f"final knn evaluation accuracy is {val_acc:.2f}")
 
+if is_distributed:
+    pass
 if args.use_dali is True:
     eval_loader = get_cifar10_Dali_loader([test_data], [test_targets], 1, 128, 1.0, args.num_workers, train=False)
     val_acc = sfl.linear_eval(eval_loader, 100, use_dali = args.use_dali)

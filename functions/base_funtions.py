@@ -23,6 +23,7 @@ class base_simulator:
         model_log_file = args.output_dir + '/output.log'
         self.logger = setup_logger('default_logger', model_log_file, level=logging.DEBUG)
         self.device = device
+        
         self.model = model # model是整个模型，会在sfl_simulator类中将该模型划分为client-side model和server-side model。
         self.criterion = criterion
         self.num_client = args.num_client
@@ -53,7 +54,7 @@ class base_simulator:
                 self.client_iterator_list.append(create_iterator(iter((train_loader[client_id]))))
     
     # MocoSFL
-    def next_data_batch(self, client_id): # 获取client_id的train_loader中下一个batch的数据
+    def next_data_batch(self, client_id, epoch = 0, is_distributed=False): # 获取client_id的train_loader中下一个batch的数据
         # 这里为什么要用iter()这么复杂的方式，而不直接用for循环？因为模型需要所有client同时遍历自己的数据，从而产生representation用于cut_layer的聚合，用for循环太复杂了。并且，每个client的batch都需要循环遍历，因此一定要使用iter()才能实现。
         try: 
             images, labels = next(self.client_iterator_list[client_id])
@@ -62,18 +63,22 @@ class base_simulator:
                     next(self.client_iterator_list[client_id])
                 except StopIteration:
                     pass
+                if is_distributed:
+                    self.client_dataloader[client_id].sampler.set_epoch(epoch)
                 self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
                 # create_iterator函数好像很多余，直接
                 # self.client_iterator_list[client_id] = iter((self.client_dataloader[client_id]))感觉也可以？
                 # self.client_dataloader== train_loader ==  get_cifar10_pairloader
                 images, labels = next(self.client_iterator_list[client_id])
         except StopIteration: # 如果已经取完了，就从头开始取。
+            if is_distributed:
+                    self.client_dataloader[client_id].sampler.set_epoch(epoch)
             self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
             images, labels = next(self.client_iterator_list[client_id])
         return images, labels #由于遍历的是pairloader，所以images和labels为正例对两个augmented images。
     
     # FedSwav
-    def next_swavdata_batch(self, client_id, use_dali, epoch = 0, local_rank=0, world_size=1):
+    def next_swavdata_batch(self, client_id, use_dali, epoch = 0, local_rank=0, world_size=1, is_distributed = False):
         try: 
             images = next(self.client_iterator_list[client_id]) # images是个list，其中包含2+6个crops
 #             pdb.set_trace()
@@ -87,16 +92,22 @@ class base_simulator:
                     next(self.client_iterator_list[client_id])
                 except StopIteration:
                     pass
-                self.client_dataloader[client_id].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
-                self.client_dataloader[client_id]._ever_consumed = False
+                if use_dali:
+                    self.client_dataloader[client_id].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
+                    self.client_dataloader[client_id]._ever_consumed = False
+                elif is_distributed:
+                    self.client_dataloader[client_id].sampler.set_epoch(epoch)
                 self.client_iterator_list[client_id] = create_iterator(iter((self.client_dataloader[client_id])))
                 # create_iterator函数好像很多余，直接
                 # self.client_iterator_list[client_id] = iter((self.client_dataloader[client_id]))感觉也可以？
                 # self.client_dataloader== train_loader ==  get_cifar10_pairloader
                 images = next(self.client_iterator_list[client_id])
         except StopIteration: # 如果已经取完了，就从头开始取。
-            self.client_dataloader[client_id].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
-            self.client_dataloader[client_id]._ever_consumed = False
+            if use_dali:
+                self.client_dataloader[client_id].reset(epoch+1, num_shards=world_size, shard_id=local_rank, shuffle = True)
+                self.client_dataloader[client_id]._ever_consumed = False
+            elif is_distributed:
+                self.client_dataloader[client_id].sampler.set_epoch(epoch)
             self.client_iterator_list[client_id] = create_iterator(iter(self.client_dataloader[client_id]))
             images = next(self.client_iterator_list[client_id])
 #         print(f"读取下一批的数据长度为{len(images.size())}")
@@ -235,11 +246,15 @@ class base_simulator:
         self.train() #set back to train mode
         return top1.avg # 返回正确率的均值
 
-    def save_model(self, epoch, is_best=False): # 保存模型
+    def save_model(self, epoch, is_best=False, is_distributed=False): # 保存模型
         if is_best:
             epoch = "best"
-        torch.save(self.model.cloud.state_dict(), self.output_dir + f'/checkpoint_s_{epoch}.tar')
-        torch.save(self.model.local_list[0].state_dict(), self.output_dir + f'/checkpoint_c_{epoch}.tar')
+        if is_distributed:
+            torch.save(self.model.cloud.module.state_dict(), self.output_dir + f'/checkpoint_s_{epoch}.tar')
+            torch.save(self.model.local_list[0].module.state_dict(), self.output_dir + f'/checkpoint_c_{epoch}.tar')
+        else:
+            torch.save(self.model.cloud.state_dict(), self.output_dir + f'/checkpoint_s_{epoch}.tar')
+            torch.save(self.model.local_list[0].state_dict(), self.output_dir + f'/checkpoint_c_{epoch}.tar')
         # 只保存第0个client-side model
         
     

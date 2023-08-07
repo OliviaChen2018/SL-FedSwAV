@@ -7,6 +7,7 @@ from PIL import ImageFilter
 import random
 import torchvision
 from torchvision.utils import make_grid
+from torch.utils.data.distributed import DistributedSampler
 # import matplotlib.pyplot as plt
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 
@@ -99,11 +100,16 @@ class DatasetSplit(torch.utils.data.Dataset):
         images, labels = self.dataset[self.idxs[item]]
         return images, labels
     
-def partition_data(training_data, labels, num_client, shuffle, num_workers, batch_size, num_class, partition = 'noniid', beta=0.4): 
+def partition_data(training_data, labels, num_client, shuffle, num_workers, batch_size, num_class, partition = 'noniid', beta=0.4, is_distributed=False): 
      #参数num_client表示client的数量
     if num_client == 1:
-        training_loader_list = [torch.utils.data.DataLoader(training_data,  batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)]
-
+        if is_distributed:
+            train_sampler = DistributedSampler(training_subset)
+            shuffle = False
+        else:
+            train_sampler=None
+        training_loader_list = [torch.utils.data.DataLoader(training_data,  batch_size=batch_size, shuffle = shuffle, sampler = train_sampler, num_workers=num_workers, pin_memory=True)]
+        
     elif num_client > 1:
         training_loader_list = []
         if partition == "homo" or partition == "iid":
@@ -145,11 +151,17 @@ def partition_data(training_data, labels, num_client, shuffle, num_workers, batc
                 net_dataidx_map[j] = idx_batch[j] # 用net_dataidx_map记录每个client拥有的样本。
                 # 封装为dataloader
                 training_subset = torch.utils.data.Subset(training_data, idx_batch[j])
+                if is_distributed:
+                    train_sampler = DistributedSampler(training_subset)
+                    shuffle = False
+                else:
+                    train_sampler = None
                 if num_workers > 0:
                     subset_training_loader = torch.utils.data.DataLoader(training_subset,
                                                                          shuffle=shuffle, 
                                                                          num_workers=num_workers,
                                                                          batch_size=batch_size, 
+                                                                         sampler = train_sampler,
                                                                          persistent_workers = True,
                                                                          pin_memory=True)
                 else:
@@ -157,6 +169,7 @@ def partition_data(training_data, labels, num_client, shuffle, num_workers, batc
                                                                          shuffle=shuffle, 
                                                                          num_workers=num_workers, 
                                                                          batch_size=batch_size, 
+                                                                         sampler = train_sampler,
                                                                          persistent_workers = False,
                                                                          pin_memory=True)
                 training_loader_list.append(subset_training_loader)
