@@ -66,4 +66,10 @@
 2. 将MocoSFL中的Moco对比训练方式换成了Simco训练方式. (Dual Temperature Helps Contrastive Learning Without Many Negative Samples: Towards Understanding and Simplifying MoCo, CVPR2022)                                                                                                                                   ( https://github.com/ChaoningZhang/Dual-temperature/tree/main )
 3. SimcoSFL的实验结果: lr=0.06(epoch<120), 0.006(120<=epoch<160), 0.0006(epoch>=160), knn_val_accu最好为74.45.
 4. 上述SimcoSFL只是一个初步结果, 调整学习率可能会得到有更好的效果. 
-5. 下一步计划: 1) 调整学习率衰减策略; 2) 把Dual Temperature这篇文章看懂; 3) 思考一下SimcoSFL的创新点; 4) 思考一下要用哪些数据集, 做哪些实验, 准备和哪些已有的工作做对比.
+5. 下一步计划: 
+    1) 调整学习率衰减策略; (猜测MultiStepLR衰减可能会比原始的CosineAnnealingLR好一点, 可以尝试分别在epoch=70, 100, 150, 180, 200时, 调整学习率为0.03, 0.0015, 0.00075, 0,000375, 即减半; 或者学习一下Simco的学习率衰减策略)
+    2) 把Dual Temperature这篇文章看懂; 
+    3) 思考一下SimcoSFL的创新点; 
+    4) 思考一下要用哪些数据集, 做哪些实验, 准备和哪些已有的工作做对比.
+    5) 可以尝试一下单卡训练, 看看acc会不会有提升, 顺便和MocoSFL比较一下单卡训练的显存占用情况(毕竟不需要队列了). 
+    6) 增大batch_size, 看看acc会不会提升.
