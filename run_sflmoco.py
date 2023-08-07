@@ -282,7 +282,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #             sfl.c_instance_list[0].cpu()
         if knn_val_acc > knn_accu_max:  # 用knn_accu_max保存最优acc，并保存knn准确率最高时的最优模型(包括server-side model和第0个client-side model)。
             knn_accu_max = knn_val_acc
-#             sfl.save_model(epoch, is_best = True) # (base_funtions.py)
+            sfl.save_model(epoch, is_best = True) # (base_funtions.py)
         epoch_logging_msg = f"epoch:{epoch}, knn_val_accu: {knn_val_acc:.2f}, contrast_loss: {avg_loss:.2f}, contrast_acc: {avg_accu:.2f}" # contrast_acc：正例对的logits比负例对的logits高则正确
         
         sfl.log(epoch_logging_msg)
