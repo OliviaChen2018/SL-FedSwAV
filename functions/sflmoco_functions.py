@@ -451,7 +451,7 @@ class create_sflmocoserver_instance(create_base_instance):
             l_neg_list = []
             for client_id in pool: #既然feature_sharing==False, 为什么query_out能被client共享？
                 l_neg_list.append(torch.einsum('nc,ck->nk', [query_out[client_id*self.batch_size:(client_id + 1)*self.batch_size], self.queue[client_id].clone().detach()]))
-                # 把
+            
             l_neg = torch.cat(l_neg_list, dim = 0)
 
         logits = torch.cat([l_pos, l_neg], dim=1)
@@ -489,6 +489,93 @@ class create_sflmocoserver_instance(create_base_instance):
             dist.all_gather_into_tensor(pkey_out_all, pkey_out)
             self._dequeue_and_enqueue(pkey_out_all, pool) # 使用当前batch的keys更新队列
 #             self._dequeue_and_enqueue(pkey_out, pool) # 使用当前batch的keys更新队列
+
+        error = loss.detach().cpu().numpy() # error变量用于记录loss的数值
+
+        if query.grad is not None:
+            query.grad.zero_() # 由于query涉及到与client端网络和server端网络相关的两个计算图，因此在server端先将query的梯度清零，
+        
+        # loss.backward(retain_graph = True)
+        loss.backward()
+
+        gradient = query.grad.detach().clone() # get gradient, the -1 is important, since updates are added to the weights in cpp.
+        # 为什么要保存query的梯度信息？因为需要传回client端网络，使各client端网络使用query的梯度信息对自己的网络进行更新。
+
+        return error, gradient, accu[0] # accu是一个list，accu[0]表示top1 accuracy。
+    
+    def simco_loss(self, query: torch.Tensor, pkey: torch.Tensor, temperature=0.1,dt_m=10) -> torch.Tensor:
+        query_out = self.model(query) 
+        # 这里的model是server-side model。在已有的query表征的基础上计算进一步表征
+        query_out = nn.functional.normalize(query_out, dim = 1) 
+        
+        with torch.no_grad():  # no gradient to keys
+
+            pkey_, idx_unshuffle = self._batch_shuffle_single_gpu(pkey) 
+            #pkey_表示打乱后的keys。打乱pkey是为了计算BN。
+            
+            pkey_out = self.t_model(pkey_) # 根据已有pkey表征计算keys的进一步表征
+
+            pkey_out = nn.functional.normalize(pkey_out, dim = 1).detach() 
+            # 对keys标准化，即BN。第1维是特征维，即对每个client中的所有表征在每个特征维对应归一化。（打乱好像没有起到任何作用？）
+
+            pkey_out = self._batch_unshuffle_single_gpu(pkey_out, idx_unshuffle) # 还原keys的顺序
+        
+         # intra-anchor hardness-awareness
+        b = query_out.size(0)
+        pos = torch.einsum('nc,nc->n', [query_out, pkey_out]).unsqueeze(-1) 
+        # Selecte the intra negative samples according the updata time, 
+        neg = torch.einsum("nc,ck->nk", [query_out, pkey_out.T])
+        mask_neg = torch.ones_like(neg, dtype=bool)
+        mask_neg.fill_diagonal_(False)
+        neg = neg[mask_neg].reshape(neg.size(0), neg.size(1)-1)
+        logits = torch.cat([pos, neg], dim=1)
+        
+        logits_intra = logits / temperature
+        prob_intra = F.softmax(logits_intra, dim=1)
+
+        # inter-anchor hardness-awareness
+        logits_inter = logits / (temperature*dt_m)
+        prob_inter = F.softmax(logits_inter, dim=1)
+
+        # hardness-awareness factor
+        inter_intra = (1 - prob_inter[:, 0]) / (1 - prob_intra[:, 0])
+        
+        loss = -torch.nn.functional.log_softmax(logits_intra, dim=-1)[:, 0]
+
+        # final loss
+        loss = inter_intra.detach() * loss
+        loss = loss.mean()
+        
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.device)
+        loss = self.criterion(logits, labels) #CELoss
+
+        accu = accuracy(logits, labels) 
+        #这里的acc不是图片预测的acc，而是计算正例对的logits比负例对logits大的acc，记为contrast acc.
+        
+        return loss, accu, query_out, pkey_out
+    
+    def compute_simco(self, query, pkey, update_momentum = True, enqueue = True, tau = 0.99, pool = None, world_size = 1):
+        # compute函数用于server端网络在已有表征的基础上计算对比loss，并针对server端的网络反向传播计算server端网络的梯度。同时，将keys的最终表征pkey_out入队作为负例。
+        query.requires_grad=True # 为什么需要修改.requires_grad参数？因为传入的query是经过.detach()的，requires_grad=False，需要修改为True，并以query为叶子节点构建新的计算图。
+
+        query.retain_grad() #.retain_grad()的目的是保留query的梯度信息。为什么要保留？在梯度计算图中反向传播计算完梯度之后，只有叶子节点的梯度信息会被保留，而非叶子节点的梯度信息会被清空，以节省空间。在SL中query的梯度信息需要被用于client端网络的反向传播，而query虽然在逻辑上是叶子节点，但实际上是一个中间节点，因此需要额外设置以保留。
+
+        if update_momentum:
+            self.update_moving_average(tau)
+
+        if self.symmetric: # 使用互信息计算
+            loss12, accu, q1, k2 = self.simco_loss(query, pkey)
+            loss21, accu, q2, k1 = self.simco_loss(pkey, query)
+            loss = loss12 + loss21
+#             pkey_out = torch.cat([k1, k2], dim = 0) # 将同一张图片的两个aug的keys都入队作为负例
+        else:
+            loss, accu, query_out, pkey_out = self.simco_loss(query, pkey)
+
+#         if enqueue:
+#             pkey_out_all = torch.zeros(world_size*pkey_out.size(0), pkey_out.size(1), device=self.device)
+#             dist.all_gather_into_tensor(pkey_out_all, pkey_out)
+#             self._dequeue_and_enqueue(pkey_out_all, pool) # 使用当前batch的keys更新队列
+# #             self._dequeue_and_enqueue(pkey_out, pool) # 使用当前batch的keys更新队列
 
         error = loss.detach().cpu().numpy() # error变量用于记录loss的数值
 

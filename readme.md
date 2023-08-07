@@ -60,3 +60,10 @@
 
 2023.8.5
 1. 将我的模型的数据读取过程改为使用DDP-Dali的方式.
+
+2023.8.7
+1. Swav不work, loss不降.
+2. 将MocoSFL中的Moco对比训练方式换成了Simco训练方式. (Dual Temperature Helps Contrastive Learning Without Many Negative Samples: Towards Understanding and Simplifying MoCo, CVPR2022)                                                                                                                                   ( https://github.com/ChaoningZhang/Dual-temperature/tree/main )
+3. SimcoSFL的实验结果: lr=0.06(epoch<120), 0.006(120<=epoch<160), 0.0006(epoch>=160), knn_val_accu最好为74.20.
+4. 上述SimcoSFL只是一个初步结果, 调整学习率可能会得到有更好的效果. 
+5. 下一步计划: 1) 调整学习率衰减策略; 2) 把Dual Temperature这篇文章看懂; 3) 思考一下SimcoSFL的创新点; 4) 思考一下要用哪些数据集, 做哪些实验, 准备和哪些已有的工作做对比.
