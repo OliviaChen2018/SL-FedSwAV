@@ -50,8 +50,12 @@ class sflmoco_simulator(base_simulator):
             if args.cos:
                 self.s_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.s_optimizer, self.num_epoch)  # learning rate decay 
             else:
-                milestones = [int(0.6*self.num_epoch), int(0.8*self.num_epoch)]
-                self.s_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.s_optimizer, milestones=milestones, gamma=0.1)  # learning rate decay 
+#                 # MocoSFL的方案
+#                 milestones = [int(0.6*self.num_epoch), int(0.8*self.num_epoch)]
+#                 self.s_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.s_optimizer, milestones=milestones, gamma=0.1)  # learning rate decay 
+                # 我的方案
+                milestones = [70, 100, 150, 180, 200, 250, 300, 350, 400]
+                self.s_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.s_optimizer, milestones=milestones, gamma=0.5)  # learning rate decay 
 
         # Create client instances
         self.c_instance_list = [] # self.c_instance_list是所有client-side model的list
@@ -71,9 +75,16 @@ class sflmoco_simulator(base_simulator):
             for i in range(args.num_client):
                 self.c_scheduler_list[i] = torch.optim.lr_scheduler.CosineAnnealingLR(self.c_optimizer_list[i], self.num_epoch)  # learning rate decay
         else:
-            milestones = [int(0.6*self.num_epoch), int(0.8*self.num_epoch)]
+#             # MocoSFL的方案
+#             milestones = [int(0.6*self.num_epoch), int(0.8*self.num_epoch)]
+#             for i in range(args.num_client):
+#                 self.c_scheduler_list[i] = torch.optim.lr_scheduler.MultiStepLR(self.c_optimizer_list[i], milestones=milestones, gamma=0.2)  # learning rate decay
+            # 我的方案
+            milestones = [70, 100, 150, 180, 200, 250, 300, 350, 400]
             for i in range(args.num_client):
-                self.c_scheduler_list[i] = torch.optim.lr_scheduler.MultiStepLR(self.c_optimizer_list[i], milestones=milestones, gamma=0.2)  # learning rate decay
+                self.c_scheduler_list[i] = torch.optim.lr_scheduler.MultiStepLR(self.c_optimizer_list[i], milestones=milestones, gamma=0.5)  # learning rate decay 
+            
+            
         # Set augmentation
         self.K_dim = args.K_dim
         self.data_size = args.data_size
