@@ -62,7 +62,7 @@ def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale
             # test_loader用于validate
             # mem_loader也是一个包含所有client dataloader的list；
 #             train_loader = get_cifar10_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
-                train_loader, traindata_cls_counts = get_cifar10_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data)
+                train_loader, traindata_cls_counts = get_cifar10_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data, is_distributed)
         else:
             train_loader = None
         mem_loader = get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
@@ -76,14 +76,17 @@ def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale
         test_loader = get_cifar10_testloader(128, num_workers, False, path_to_data)
         return train_loader, test_loader
 
-def get_cifar100(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+def get_cifar100(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', aug_type = None, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data", is_distributed = False):
     if pairloader_option != "None":
-        train_loader = get_cifar100_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
+        # MocoSFL的
+#         train_loader = get_cifar100_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
+        # Dirichlet分布的
+        train_loader, traindata_cls_counts = get_cifar100_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data, is_distributed)
         mem_loader = get_cifar100_trainloader(128, num_workers, False, path_to_data = path_to_data)
         test_loader = get_cifar100_testloader(128, num_workers, False, path_to_data)
-        return train_loader, mem_loader, test_loader
+        return train_loader, traindata_cls_counts, mem_loader, test_loader
     else:
-        train_loader = get_cifar100_trainloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, augmentation_option, hetero, hetero_string, path_to_data)
+        train_loader = get_cifar100_trainloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, augmentation_option, hetero, hetero_string, path_to_data, is_distributed)
         test_loader = get_cifar100_testloader(128, num_workers, False, path_to_data)
         return train_loader, test_loader
 
@@ -315,6 +318,62 @@ def get_cifar10_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True,
     
     return cifar10_training_loader, traindata_cls_counts
 
+def get_cifar100_pairloader_dirichlet(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition = 'noniid', hetero = False, path_to_data = "./data", is_distributed=False):
+    
+    class CIFAR100Pair(torchvision.datasets.CIFAR100):
+        """CIFAR10 Dataset. CIFAR10Pair类返回的是一个Dataset类型的变量
+        """
+        def __getitem__(self, index):
+            img = self.data[index]
+            img = Image.fromarray(img)
+            if self.transform is not None:
+                im_1 = self.transform(img)
+                im_2 = self.transform(img)
+
+            return im_1, im_2
+        
+    if pairloader_option == "mocov1":
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(32),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_TRAIN_MEAN, CIFAR10_TRAIN_STD)])
+    elif pairloader_option == "mocov2":
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(32),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_TRAIN_MEAN, CIFAR10_TRAIN_STD)])
+    else:
+        train_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(CIFAR10_TRAIN_MEAN, CIFAR10_TRAIN_STD)])
+    # data prepare
+    
+    train_data = CIFAR100Pair(root=path_to_data, 
+                             train=True, 
+                             transform=train_transform, 
+                             download=True) 
+    #train_data是一个Dataset变量，调用getitem函数会得到包含若干个img pair元组
+    target = np.array(train_data.targets)
+#     data_portion=0.1
+#     indices = torch.randperm(len(train_data))[:int(len(train_data)* data_portion)]
+    # 按照data_portion的比例，从train_data中随机选出部分样本作为训练集。
+
+#     train_target = target[indices]
+    
+    # data表示数据集中的所有样本值，target表示样本标签。
+#     print(len(train_target))
+    
+    cifar100_training_loader, traindata_cls_counts = partition_data(train_data, target, num_client, shuffle, num_workers, batch_size, num_class=100, partition = partition, beta=0.4, is_distributed=is_distributed)
+    
+    return cifar100_training_loader, traindata_cls_counts
+
 def get_cifar10_multicroploader_dirichlet(size_crops, nmb_crops, min_scale_crops, max_scale_crops, batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, pairloader_option = "None", partition='non-iid', hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data", is_distributed=False):
 #     print("MultiCropCifar10Dataset")
     train_data = MultiCropCifar10Dataset(
@@ -434,8 +493,7 @@ def get_tinyimagenet_testloader(batch_size=16, num_workers=2, shuffle=False, pat
         transforms.Normalize(TINYIMAGENET_TRAIN_MEAN, TINYIMAGENET_TRAIN_STD)
     ])
     tinyimagenet_testing = datasets.ImageFolder(f'{path_to_data}/val', transform=transform_test)
-    tinyimagenet_testing_loader = torch.utils.data.DataLoader(tinyimagenet_testing,  batch_size=batch_size, shuffle=shuffle,
-                num_workers=num_workers)
+    tinyimagenet_testing_loader = torch.utils.data.DataLoader(tinyimagenet_testing,  batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return tinyimagenet_testing_loader
 
 

@@ -126,6 +126,7 @@ else:
 # sfl.s_instance.cuda(args.device)
 
 sfl.log(f'Data statistics: {str(traindata_cls_counts)}')
+sfl.log(f'Args: {args}')
     
 '''Training'''
 if not args.resume: # 模型从头训练(而不是resume from checkpoint)

@@ -113,6 +113,7 @@ def partition_data(training_data, labels, num_client, shuffle, num_workers, batc
     elif num_client > 1:
         training_loader_list = []
         if partition == "homo" or partition == "iid":
+            N = labels.shape[0]
             idxs = np.random.permutation(N)   #在训练集的条数范围内生成随机序列
             batch_idxs = np.array_split(idxs, num_client)
             net_dataidx_map = {i: batch_idxs[i] for i in range(num_client)}
