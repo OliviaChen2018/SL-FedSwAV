@@ -38,6 +38,8 @@ if args.is_distributed :
     device = torch.device("cuda", local_rank) # 获取device，之后的模型和张量都.to(device)
 else:
     device = args.device
+    local_rank=0
+    world_size=1
 
 '''Preparing'''
 #get data
@@ -116,7 +118,7 @@ criterion = nn.CrossEntropyLoss().to(args.device)
 if args.is_distributed:
     sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args, device=device, local_rank=local_rank, is_distributed=args.is_distributed)
 else:
-    sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args)
+    sfl = sflmoco_simulator(global_model, criterion, train_loader, test_loader, args,  device=args.device)
 
 # if args.cutlayer > 1: # 为什么设置了cutlayer就要把sfl加载到cuda上？
 # #     sfl.cuda() # sfl加载到cuda，就是把sfl的server-side model和client-side model都加载到cuda
@@ -228,7 +230,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             if loss_status.status == "A": # loss大于某个阈值的时候才更新client-side models
                 # Initialize clients' queue, to store partial gradients
                 gradient_dict = {key: [] for key in range(len(pool))} # 用于存放每个client的gradient
-                
+                sum_gradient_dict = {key: [] for key in range(len(pool))}
                 # 如果使用Dirichlet分布划分client数据，则需要在query计算的时候记录client有几条数据，以便于这里gradient的分配。
 
                 # 将梯度返回给各client
@@ -239,11 +241,14 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 else:
 #                     start_grad_idx = 0
                     query_index = torch.tensor(query_num).cumsum(dim=0)
+                    
                     for j in range(len(pool)):
                         if j==0:
                             gradient_dict[j] = gradient[0:query_index[j], :]
+                            sum_gradient = gradient[0:query_index[j], :]
                         else:
                             gradient_dict[j] = gradient[query_index[j-1]:query_index[j], :]
+                            sum_gradient += gradient_dict[j]
 #                         gradient_dict[j].size()==[bs, 64, input_size, input_size]
 #                         if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
 #                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
@@ -252,23 +257,29 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
 #                             start_grad_idx += args.batch_size
 
+                    for j in range(len(pool)):
+                        sum_gradient_dict[j] = sum_gradient/len(pool)
+
                 #client backward
-                client_backward(sfl, pool, gradient_dict) # 各client以自己的gradient进行反向传播
+#                 client_backward(sfl, pool, gradient_dict) # 各client以自己的gradient进行反向传播
+                client_backward(sfl, pool, sum_gradient_dict)
             else:
                 # (optional) step client scheduler (lower its LR)
                 pass
 
             gc.collect() # 这里只是为了避免出现内存泄露
 
-            if batch == num_batch - 1 or (batch % (num_batch//args.avg_freq) == (num_batch//args.avg_freq) - 1):
-                # sync client-side models 
-                # num_batch==len(train_loader[0])，即训练集中batch的数量。
-                divergence_list = sfl.fedavg(pool, divergence_aware = args.divergence_aware, divergence_measure = args.divergence_measure)
-                # 每多少步，对client-side models进行divergence-aware的动量更新。
-                # divergence_list中存放的是每个client-side model参数与参数均值之间的divergence。
+            # 利用所有client的梯度(sum_gradient_dict)的时候不做avg
+#             if batch == num_batch - 1 or (batch % (num_batch//args.avg_freq) == (num_batch//args.avg_freq) - 1):
+#                 # sync client-side models 
+#                 # num_batch==len(train_loader[0])，即训练集中batch的数量。
+#                 # 
+#                 divergence_list = sfl.fedavg(pool, divergence_aware = args.divergence_aware, divergence_measure = args.divergence_measure)
+#                 # 每多少步，对client-side models进行divergence-aware的动量更新。
+#                 # divergence_list中存放的是每个client-side model参数与参数均值之间的divergence。
                 
-                if divergence_list is not None:
-                    sfl.log(f"divergence mean: {np.mean(divergence_list)}, std: {np.std(divergence_list)} and detailed_list: {divergence_list}")
+#                 if divergence_list is not None:
+#                     sfl.log(f"divergence mean: {np.mean(divergence_list)}, std: {np.std(divergence_list)} and detailed_list: {divergence_list}")
                     
         sfl.s_scheduler.step()
 
