@@ -25,7 +25,7 @@ import pdb
 
 
 class sflmoco_simulator(base_simulator):
-    def __init__(self, model, criterion, train_loader, test_loader, args, device, local_rank, is_distributed=False) -> None:
+    def __init__(self, model, criterion, train_loader, test_loader, args, device, local_rank=0, is_distributed=False) -> None:
         super().__init__(model, criterion, train_loader, test_loader, device, args)
         
         # Create server instances
@@ -37,9 +37,8 @@ class sflmoco_simulator(base_simulator):
                                                             device,
                                                             self.model.get_smashed_data_size(1, args.data_size), 
                                                             feature_sharing=args.feature_sharing)
-            
+            self.s_instance.cuda(self.device)
             if is_distributed:
-                self.s_instance.cuda(self.device)
                 self.s_instance.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.s_instance.model).to(self.device)
                 self.s_instance.model = DDP(self.s_instance.model, device_ids=[local_rank], output_device=local_rank)
             self.s_optimizer = torch.optim.SGD(list(self.s_instance.model.parameters()), 
@@ -64,8 +63,8 @@ class sflmoco_simulator(base_simulator):
 
         self.c_optimizer_list = [None for i in range(args.num_client)]
         for i in range(args.num_client):
+            self.c_instance_list[i].cuda(self.device)
             if is_distributed:
-                self.c_instance_list[i].cuda(self.device)
                 self.c_instance_list[i].model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.c_instance_list[i].model).to(self.device)
                 self.c_instance_list[i].model = DDP(self.c_instance_list[i].model, device_ids=[local_rank], output_device=local_rank)
             self.c_optimizer_list[i] = torch.optim.SGD(list(self.c_instance_list[i].model.parameters()), lr=args.c_lr, momentum=args.momentum, weight_decay=args.weight_decay)

@@ -17,6 +17,7 @@ from functions.sfl_functions import client_backward, loss_based_status
 from functions.attack_functions import MIA_attacker, MIA_simulator
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from utils import sparsify
 import gc
 import os
 VERBOSE = False
@@ -44,18 +45,32 @@ else:
 '''Preparing'''
 #get data
 create_dataset = getattr(datasets, f"get_{args.dataset}")
-train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
-    batch_size=args.batch_size,
-    num_workers=args.num_workers, 
-    shuffle=True, 
-    num_client = args.num_client, 
-    data_proportion = args.data_proportion, 
-    noniid_ratio = args.noniid_ratio, 
-    augmentation_option = True, 
-    pairloader_option = args.pairloader_option, 
-    hetero = args.hetero, 
-    hetero_string = args.hetero_string,
-    is_distributed = args.is_distributed)
+if args.dirichlet:
+    train_loader, traindata_cls_counts, mem_loader, test_loader =create_dataset(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers, 
+        shuffle=True, 
+        num_client = args.num_client, 
+        data_proportion = args.data_proportion, 
+        noniid_ratio = args.noniid_ratio, 
+        augmentation_option = True, 
+        pairloader_option = args.pairloader_option, 
+        hetero = args.hetero, 
+        hetero_string = args.hetero_string,
+        is_distributed = args.is_distributed)
+else:
+    train_loader, mem_loader, test_loader =create_dataset(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers, 
+        shuffle=True, 
+        num_client = args.num_client, 
+        data_proportion = args.data_proportion, 
+        noniid_ratio = args.noniid_ratio, 
+        augmentation_option = True, 
+        pairloader_option = args.pairloader_option, 
+        hetero = args.hetero, 
+        hetero_string = args.hetero_string,
+        is_distributed = args.is_distributed)
 # datasets.py
 # train_loader ==  get_cifar10_pairloader （train_loader作为对比学习的训练集）
 # mem_loader == get_cifar10_trainloader(128, num_workers, False, path_to_data = path_to_data)
@@ -126,8 +141,8 @@ else:
 # else:
 #     sfl.cpu()
 # sfl.s_instance.cuda(args.device)
-
-sfl.log(f'Data statistics: {str(traindata_cls_counts)}')
+if args.dirichlet:
+    sfl.log(f'Data statistics: {str(traindata_cls_counts)}')
 sfl.log(f'Args: {args}')
     
 '''Training'''
@@ -139,11 +154,11 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
     knn_accu_max = 0.0
 
     #heterogeneous resources setting
-    if args.hetero:
-        pass
-#         sfl.log(f"Hetero setting: {args.hetero_string}")
-#         rich_clients = int(float(args.hetero_string.split("|")[0].split("_")[0]) * args.num_client)
-#         rich_clients_batch_size = int(float(args.hetero_string.split("|")[1]) * args.batch_size)
+    if args.hetero and not args.dirichlet:
+#         pass
+        sfl.log(f"Hetero setting: {args.hetero_string}")
+        rich_clients = int(float(args.hetero_string.split("|")[0].split("_")[0]) * args.num_client)
+        rich_clients_batch_size = int(float(args.hetero_string.split("|")[1]) * args.batch_size)
     
     loss_status = loss_based_status(loss_threshold = args.loss_threshold)
     
@@ -231,6 +246,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 # Initialize clients' queue, to store partial gradients
                 gradient_dict = {key: [] for key in range(len(pool))} # 用于存放每个client的gradient
                 sum_gradient_dict = {key: [] for key in range(len(pool))}
+                spasify_gra = {key: [] for key in range(len(pool))}
                 # 如果使用Dirichlet分布划分client数据，则需要在query计算的时候记录client有几条数据，以便于这里gradient的分配。
 
                 # 将梯度返回给各client
@@ -239,30 +255,33 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                         gradient_dict[j] = gradient[j*args.batch_size:(j+1)*args.batch_size, :]
                         
                 else:
-#                     start_grad_idx = 0
+                    start_grad_idx = 0
                     query_index = torch.tensor(query_num).cumsum(dim=0)
                     
+                    
                     for j in range(len(pool)):
-                        if j==0:
-                            gradient_dict[j] = gradient[0:query_index[j], :]
-                            sum_gradient = gradient[0:query_index[j], :]
-                        else:
-                            gradient_dict[j] = gradient[query_index[j-1]:query_index[j], :]
-                            sum_gradient += gradient_dict[j]
-#                         gradient_dict[j].size()==[bs, 64, input_size, input_size]
-#                         if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
-#                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
-#                             start_grad_idx += rich_clients_batch_size
+#                         if j==0:
+#                             gradient_dict[j] = gradient[0:query_index[j], :]
+#                             sum_gradient = gradient[0:query_index[j], :]
 #                         else:
-#                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
-#                             start_grad_idx += args.batch_size
+#                             gradient_dict[j] = gradient[query_index[j-1]:query_index[j], :]
+#                             sum_gradient += gradient_dict[j]
+#                         gradient_dict[j].size()==[bs, 64, input_size, input_size]
+                        if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
+                            gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
+#                             spasify_gra[j] = sparsify(gradient_dict[j], compress_ratio=0.4, num_grad=rich_clients_batch_size)
+#                             sum_gradient_dict[j] = 
+                            start_grad_idx += rich_clients_batch_size
+                        else:
+                            gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
+                            start_grad_idx += args.batch_size
 
-                    for j in range(len(pool)):
-                        sum_gradient_dict[j] = sum_gradient/len(pool)
+#                     for j in range(len(pool)):
+#                         sum_gradient_dict[j] = sum_gradient / len(pool)
 
                 #client backward
-#                 client_backward(sfl, pool, gradient_dict) # 各client以自己的gradient进行反向传播
-                client_backward(sfl, pool, sum_gradient_dict)
+                client_backward(sfl, pool, gradient_dict) # 各client以自己的gradient进行反向传播
+#                 client_backward(sfl, pool, sum_gradient_dict)
             else:
                 # (optional) step client scheduler (lower its LR)
                 pass
@@ -270,16 +289,16 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             gc.collect() # 这里只是为了避免出现内存泄露
 
             # 利用所有client的梯度(sum_gradient_dict)的时候不做avg
-#             if batch == num_batch - 1 or (batch % (num_batch//args.avg_freq) == (num_batch//args.avg_freq) - 1):
-#                 # sync client-side models 
-#                 # num_batch==len(train_loader[0])，即训练集中batch的数量。
-#                 # 
-#                 divergence_list = sfl.fedavg(pool, divergence_aware = args.divergence_aware, divergence_measure = args.divergence_measure)
-#                 # 每多少步，对client-side models进行divergence-aware的动量更新。
-#                 # divergence_list中存放的是每个client-side model参数与参数均值之间的divergence。
+            if batch == num_batch - 1 or (batch % (num_batch//args.avg_freq) == (num_batch//args.avg_freq) - 1):
+                # sync client-side models 
+                # num_batch==len(train_loader[0])，即训练集中batch的数量。
+                # 
+                divergence_list = sfl.fedavg(pool, divergence_aware = args.divergence_aware, divergence_measure = args.divergence_measure)
+                # 每多少步，对client-side models进行divergence-aware的动量更新。
+                # divergence_list中存放的是每个client-side model参数与参数均值之间的divergence。
                 
-#                 if divergence_list is not None:
-#                     sfl.log(f"divergence mean: {np.mean(divergence_list)}, std: {np.std(divergence_list)} and detailed_list: {divergence_list}")
+                if divergence_list is not None:
+                    sfl.log(f"divergence mean: {np.mean(divergence_list)}, std: {np.std(divergence_list)} and detailed_list: {divergence_list}")
                     
         sfl.s_scheduler.step()
 

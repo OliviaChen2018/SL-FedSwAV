@@ -76,15 +76,21 @@ def get_cifar10(size_crops=None, nmb_crops=None, min_scale_crops=None, max_scale
         test_loader = get_cifar10_testloader(128, num_workers, False, path_to_data)
         return train_loader, test_loader
 
-def get_cifar100(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', aug_type = None, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data", is_distributed = False):
+def get_cifar100(batch_size=16, num_workers=4, shuffle=True, num_client = 1, data_proportion = 1.0, noniid_ratio =1.0, augmentation_option = False, pairloader_option = "None", partition = 'noniid', aug_type = None, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data", is_distributed = False, dirichlet=False):
     if pairloader_option != "None":
-        # MocoSFL的
-#         train_loader = get_cifar100_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data)
-        # Dirichlet分布的
-        train_loader, traindata_cls_counts = get_cifar100_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data, is_distributed)
+        if not dirichlet:
+            # MocoSFL的
+            train_loader = get_cifar100_pairloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, pairloader_option, hetero, hetero_string, path_to_data, is_distributed)
+        else:
+#             Dirichlet分布的
+            train_loader, traindata_cls_counts = get_cifar100_pairloader_dirichlet(batch_size, num_workers, shuffle, num_client, data_proportion, pairloader_option, partition, hetero, path_to_data, is_distributed)
         mem_loader = get_cifar100_trainloader(128, num_workers, False, path_to_data = path_to_data)
         test_loader = get_cifar100_testloader(128, num_workers, False, path_to_data)
-        return train_loader, traindata_cls_counts, mem_loader, test_loader
+        
+        if not dirichlet:
+            return train_loader, mem_loader, test_loader
+        else:
+            return train_loader, traindata_cls_counts, mem_loader, test_loader
     else:
         train_loader = get_cifar100_trainloader(batch_size, num_workers, shuffle, num_client, data_proportion, noniid_ratio, augmentation_option, hetero, hetero_string, path_to_data, is_distributed)
         test_loader = get_cifar100_testloader(128, num_workers, False, path_to_data)
@@ -199,7 +205,7 @@ def get_tinyimagenet_pairloader(batch_size=16, num_workers=2, shuffle=True, num_
     return cifar100_training_loader
 
 
-def get_cifar100_pairloader(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, noniid_ratio = 1.0, pairloader_option = "None", hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data"):
+def get_cifar100_pairloader(batch_size=16, num_workers=2, shuffle=True, num_client = 1, data_portion = 1.0, noniid_ratio = 1.0, pairloader_option = "None", hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", path_to_data = "./data", is_distributed=False):
     class CIFAR100Pair(torchvision.datasets.CIFAR100):
         """CIFAR100 Dataset.
         """
@@ -241,7 +247,7 @@ def get_cifar100_pairloader(batch_size=16, num_workers=2, shuffle=True, num_clie
 
     train_data = torch.utils.data.Subset(train_data, indices)
     
-    cifar100_training_loader = get_multiclient_trainloader_list(train_data, num_client, shuffle, num_workers, batch_size, noniid_ratio, 100, hetero, hetero_string)
+    cifar100_training_loader = get_multiclient_trainloader_list(train_data, num_client, shuffle, num_workers, batch_size, noniid_ratio, 100, hetero, hetero_string, is_distributed)
     
     return cifar100_training_loader
 

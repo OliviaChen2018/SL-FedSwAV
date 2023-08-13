@@ -24,6 +24,7 @@ def get_sfl_args():
     # training specific args
     parser.add_argument('--arch', type=str, default='ResNet18', help="which architecture to use")
     parser.add_argument('--dataset', type=str, default='cifar10', help='choose from cifar10, cifar100, imagenet')
+    parser.add_argument('--dirichlet', action='store_true', default=False, help="if use dirichlet")
     parser.add_argument('--aux_data', type=str, default='cifar100', help='used only in expert_target_aware, as auxiliary dataset, choose from cifar10, cifar100, imagenet')
     parser.add_argument('--num_class', type=int, default=10, help="number of classes: N")
     parser.add_argument('--num_epoch', type=int, default=200)

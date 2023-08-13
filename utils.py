@@ -69,6 +69,20 @@ def distributed_concat(tensor, num_total_examples, world_size):
     # truncate the dummy elements added by SequentialDistributedSampler
     return concat[:num_total_examples]
 
+def sparsify(tensor, compress_ratio, num_grad):
+    # num_grad表示tensor的第0维的维数，即tensor中有多少个grad.
+    dim_1 = tensor.size(1) # 获取tensor的维数
+    tensor = tensor.view(-1)
+    samples = tensor.abs() #对tensor中的元素取绝对值
+    numel = tensor.numel()
+    top_k = max(1, int(numel * compress_ratio))
+    threshold = torch.min(torch.topk(samples, top_k, dim=0, largest=True, sorted=False)[0]) # 找出前k个最大值中的最小值，作为阈值
+    mask = torch.ge(samples, threshold) # 设置掩码，大于阈值的位置为1，小于阈值的位置为0
+    indices = mask.nonzero().view(-1) # 得到选中元素的下标
+    tensor = tensor[indices]
+    return tensor, indices #问题: 这个tensor是压缩的, 怎么用来反向传播?
+    
+
 class AverageMeter(object): # 一个用于存储和 和 均值的对象
     """Computes and stores the average and current value"""
     def __init__(self):
@@ -202,14 +216,20 @@ def record_net_data_stats(y_train, net_dataidx_map):
     return net_cls_counts
 
 
-def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_workers, batch_size, noniid_ratio = 1.0, num_class = 10, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2"):
+def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_workers, batch_size, noniid_ratio = 1.0, num_class = 10, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", is_distributed=False):
     #mearning of default hetero_string = "C_D|B" - dividing clients into two groups, stronger group: C clients has D of the data (batch size = B); weaker group: the other (1-C) clients have (1-D) of the data (batch size = 1).
     '''返回所有client的dataloader组成的list'''
     if num_client == 1: # 只有1个client的时候
         # 对于mem_loader和test_loader，num_client为默认值1
-        training_loader_list = [torch.utils.data.DataLoader(training_data,  
+        if is_distributed:
+            train_sampler = DistributedSampler(training_subset)
+            shuffle = False
+        else:
+            train_sampler=None
+        training_loader_list = [torch.utils.data.DataLoader(training_data, 
                                                             batch_size=batch_size, 
                                                             shuffle=shuffle,
+                                                            sampler = train_sampler,
                                                             num_workers=num_workers)]
     elif num_client > 1:
         if noniid_ratio < 1.0:
@@ -240,13 +260,18 @@ def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_wor
             else:
                 training_subset = DatasetSplit(training_data, training_subset_list[i])
             # print(len(training_subset))
+            if is_distributed:
+                train_sampler = DistributedSampler(training_subset)
+                shuffle = False
+            else:
+                train_sampler=None
             if not hetero:
                 if num_workers > 0:
                     subset_training_loader = torch.utils.data.DataLoader(
-                        training_subset, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size, persistent_workers = True)
+                        training_subset, shuffle=shuffle, sampler = train_sampler, num_workers=num_workers, batch_size=batch_size, persistent_workers = True)
                 else:
                     subset_training_loader = torch.utils.data.DataLoader(
-                        training_subset, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size, persistent_workers = False)
+                        training_subset, shuffle=shuffle, sampler = train_sampler, num_workers=num_workers, batch_size=batch_size, persistent_workers = False)
             else:
                 if i < rich_client:
                     real_batch_size = batch_size * int(hetero_string.split("|")[1]) 
@@ -256,10 +281,10 @@ def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_wor
                 #当有多个workers时，设置persistent_workers为True，使workers一直开启。
                 if num_workers > 0: 
                     subset_training_loader = torch.utils.data.DataLoader(
-                        training_subset, shuffle=shuffle, num_workers=num_workers, batch_size=real_batch_size, persistent_workers = True)
+                        training_subset, shuffle=shuffle, sampler = train_sampler, num_workers=num_workers, batch_size=real_batch_size, persistent_workers = True)
                 else:
                     subset_training_loader = torch.utils.data.DataLoader(
-                        training_subset, shuffle=shuffle, num_workers=num_workers, batch_size=real_batch_size, persistent_workers = False)
+                        training_subset, shuffle=shuffle, sampler = train_sampler, num_workers=num_workers, batch_size=real_batch_size, persistent_workers = False)
                 # print(f"batch size is {real_batch_size}")
             training_loader_list.append(subset_training_loader)
     
