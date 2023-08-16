@@ -53,7 +53,8 @@ class sflmoco_simulator(base_simulator):
 #                 milestones = [int(0.6*self.num_epoch), int(0.8*self.num_epoch)]
 #                 self.s_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.s_optimizer, milestones=milestones, gamma=0.1)  # learning rate decay 
                 # 我的方案
-                milestones = [120, 200, 260, 310, 360]
+#                 milestones = [120, 200, 260, 310, 360]
+                milestones = [100, 150, 200, 250, 300, 350]
                 self.s_scheduler = torch.optim.lr_scheduler.MultiStepLR(self.s_optimizer, milestones=milestones, gamma=0.6)  # learning rate decay 
 
         # Create client instances
@@ -79,7 +80,8 @@ class sflmoco_simulator(base_simulator):
 #             for i in range(args.num_client):
 #                 self.c_scheduler_list[i] = torch.optim.lr_scheduler.MultiStepLR(self.c_optimizer_list[i], milestones=milestones, gamma=0.2)  # learning rate decay
             # 我的方案
-            milestones = [120, 200, 260, 310, 360]
+#             milestones = [120, 200, 260, 310, 360]
+            milestones = [100, 150, 200, 250, 300, 350]
             for i in range(args.num_client):
                 self.c_scheduler_list[i] = torch.optim.lr_scheduler.MultiStepLR(self.c_optimizer_list[i], milestones=milestones, gamma=0.6)  # learning rate decay 
             
@@ -88,6 +90,8 @@ class sflmoco_simulator(base_simulator):
         self.K_dim = args.K_dim
         self.data_size = args.data_size
         self.arch = args.arch
+        self.momentums = {i: torch.zeros([1,64,32,32]) for i in range(args.num_client)}
+        self.velocities = {i: torch.zeros([1,64,32,32]) for i in range(args.num_client)}
         
     def linear_eval(self, memloader, num_epochs = 100, lr = 3.0): # Use linear evaluation
         """
@@ -513,7 +517,7 @@ class create_sflmocoserver_instance(create_base_instance):
 
         return error, gradient, accu[0] # accu是一个list，accu[0]表示top1 accuracy。
     
-    def simco_loss(self, query: torch.Tensor, pkey: torch.Tensor, temperature=0.1,dt_m=10) -> torch.Tensor:
+    def simmoco_loss(self, query: torch.Tensor, pkey: torch.Tensor, temperature=0.1,dt_m=10) -> torch.Tensor:
         query_out = self.model(query) 
         # 这里的model是server-side model。在已有的query表征的基础上计算进一步表征
         query_out = nn.functional.normalize(query_out, dim = 1) 
@@ -529,6 +533,55 @@ class create_sflmocoserver_instance(create_base_instance):
             # 对keys标准化，即BN。第1维是特征维，即对每个client中的所有表征在每个特征维对应归一化。（打乱好像没有起到任何作用？）
 
             pkey_out = self._batch_unshuffle_single_gpu(pkey_out, idx_unshuffle) # 还原keys的顺序
+        
+         # intra-anchor hardness-awareness
+        b = query_out.size(0)
+        pos = torch.einsum('nc,nc->n', [query_out, pkey_out]).unsqueeze(-1) 
+        # Selecte the intra negative samples according the updata time, 
+        neg = torch.einsum("nc,ck->nk", [query_out, pkey_out.T])
+        mask_neg = torch.ones_like(neg, dtype=bool)
+        mask_neg.fill_diagonal_(False)
+        neg = neg[mask_neg].reshape(neg.size(0), neg.size(1)-1)
+        logits = torch.cat([pos, neg], dim=1)
+        
+        logits_intra = logits / temperature
+        prob_intra = F.softmax(logits_intra, dim=1)
+
+        # inter-anchor hardness-awareness
+        logits_inter = logits / (temperature*dt_m)
+        prob_inter = F.softmax(logits_inter, dim=1)
+
+        # hardness-awareness factor
+        inter_intra = (1 - prob_inter[:, 0]) / (1 - prob_intra[:, 0])
+        
+        loss = -torch.nn.functional.log_softmax(logits_intra, dim=-1)[:, 0]
+
+        # final loss
+        loss = inter_intra.detach() * loss
+        loss = loss.mean()
+        
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.device)
+        loss = self.criterion(logits, labels) #CELoss
+
+        accu = accuracy(logits, labels) 
+        #这里的acc不是图片预测的acc，而是计算正例对的logits比负例对logits大的acc，记为contrast acc.
+        
+        return loss, accu, query_out, pkey_out
+    
+    def simco_loss(self, query: torch.Tensor, pkey: torch.Tensor, temperature=0.1,dt_m=10) -> torch.Tensor:
+        query_out = self.model(query) 
+        # 这里的model是server-side model。在已有的query表征的基础上计算进一步表征
+        query_out = nn.functional.normalize(query_out, dim = 1) 
+        
+        pkey_, idx_unshuffle = self._batch_shuffle_single_gpu(pkey) 
+        #pkey_表示打乱后的keys。打乱pkey是为了计算BN。
+
+        pkey_out = self.model(pkey_) # 根据已有pkey表征计算keys的进一步表征
+
+        pkey_out = nn.functional.normalize(pkey_out, dim = 1)
+        # 对keys标准化，即BN。第1维是特征维，即对每个client中的所有表征在每个特征维对应归一化。（打乱好像没有起到任何作用？）
+
+        pkey_out = self._batch_unshuffle_single_gpu(pkey_out, idx_unshuffle) # 还原keys的顺序
         
          # intra-anchor hardness-awareness
         b = query_out.size(0)

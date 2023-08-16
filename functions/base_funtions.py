@@ -12,8 +12,7 @@ Refer to Thapa et al. https://arxiv.org/abs/2004.12088 for technical details.
 from email.policy import strict
 import torch
 import logging
-from utils import AverageMeter, accuracy, average_weights
-from utils import setup_logger
+from utils import AverageMeter, accuracy, average_weights, setup_logger, SinkhornDistance
 import pdb
 
 class base_simulator:
@@ -125,6 +124,8 @@ class base_simulator:
     def fedavg(self, pool = None, divergence_aware = False, divergence_measure = False):
         # 参数divergence_measure的作用：判断是否计算divergence
         # 参数divergence_aware的作用：判断是否计算divergence，并使用由divergence计算得到的\mu对本轮client-side model进行动量更新。
+        sinkhorn = SinkhornDistance(eps=0.1, max_iter=100, reduction=None)
+        
         global_weights = average_weights(self.model.local_list, pool) 
         # 计算client-side model参数的均值
         if divergence_measure:
@@ -147,6 +148,8 @@ class base_simulator:
                                                                dim = -1, ord = 2)
                         # ord=2计算向量的最大奇异值，也就是向量的2范数。
                         # 第i个client的所有层的divergence求和，存入weight_divergence。
+#                         dist, P, C = sinkhorn(self.model.local_list[i].state_dict()[key], global_weights[key])
+#                         weight_divergence += dist.sum()
                     divergence_list.append(weight_divergence.item())
 
             if divergence_aware:
@@ -168,7 +171,8 @@ class base_simulator:
                         if "running" in key or "num_batches" in key: # skipping batchnorm running stats
                             continue
                         weight_divergence += torch.linalg.norm(torch.flatten(self.model.local_list[i].state_dict()[key] - global_weights[key]).float(), dim = -1, ord = 2)
-                    
+#                         dist, P, C = sinkhorn(self.model.local_list[i].state_dict()[key], global_weights[key])
+#                         weight_divergence += dist.sum()
                     mu = self.div_lambda[i] * weight_divergence.item() # the choice of dic_lambda depends on num_param in client-side model （所有div_lambda的初值为1.0)
                     mu = 1 if mu >= 1 else mu # If divergence is too large, just do personalization & don't consider the average.
 
@@ -184,6 +188,9 @@ class base_simulator:
                     self.model.local_list[i].load_state_dict(global_weights)
             else: # divergence_aware=False:不使用divergence-aware的动量更新,直接使用聚合参数更新。
                 '''Normal case: directly get the averaged result'''
+#                 mu=0.1
+#                 for key in global_weights.keys(): # 使用聚合参数对local model的参数进行动量更新
+#                     self.model.local_list[i].state_dict()[key] = mu * self.model.local_list[i].state_dict()[key] + (1 - mu) * global_weights[key]
                 self.model.local_list[i].load_state_dict(global_weights)
 
         if divergence_measure: # 如果计算了divergence,则函数返回所有client-side model的divergence

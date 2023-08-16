@@ -17,7 +17,7 @@ from functions.sfl_functions import client_backward, loss_based_status
 from functions.attack_functions import MIA_attacker, MIA_simulator
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from utils import sparsify
+from utils import sparsify, conpensate, update
 import gc
 import os
 VERBOSE = False
@@ -26,7 +26,7 @@ args = get_sfl_args()
 set_deterministic(args.seed)
 
 if args.is_distributed :
-    os.environ['CUDA_VISIBLE_DEVICES'] = "2,3,4,5" # SflMoco
+    os.environ['CUDA_VISIBLE_DEVICES'] = "4,6" # SflMoco
     local_rank = int(os.environ["LOCAL_RANK"]) 
     print(f"local_rank: {local_rank}\n")
     world_size = int(os.environ["WORLD_SIZE"]) 
@@ -201,9 +201,12 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                     #是不是应该.detach()啊？client的forward函数的返回值已经做了detach了。
                     # 使用client-side部分对aug1进行表征
                     hidden_query_list[i] = hidden_query #将aug1(query)的表征用一个list保存起来
-                    with torch.no_grad():
-                        # pass to target 
-                        hidden_pkey = sfl.c_instance_list[client_id].t_model(pkey).detach()  
+                    # simco的方式
+                    hidden_pkey = sfl.c_instance_list[client_id](pkey)
+                    # simmoco的方式
+#                     with torch.no_grad():
+#                         # pass to target 
+#                         hidden_pkey = sfl.c_instance_list[client_id].t_model(pkey).detach()  
                         # self.t_model = copy.deepcopy(model)
                         # 在MoCo中，生成key的encoder进行动量更新(而不通过梯度反向传播),因此要使用一个深拷贝的模型，并.detach切断梯度计算链，再计算aug2(key)的表征。
                     hidden_pkey_list[i] = hidden_pkey # 将aug2(key)的表征用一个list保存起来
@@ -227,9 +230,9 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             sfl.s_optimizer.zero_grad()
     
             #server compute
-#             loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
+            loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
 
-            loss, gradient, accu = sfl.s_instance.compute_simco(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size)
+#             loss, gradient, accu = sfl.s_instance.compute_simco(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size)
 
             sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
@@ -247,6 +250,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                 gradient_dict = {key: [] for key in range(len(pool))} # 用于存放每个client的gradient
                 sum_gradient_dict = {key: [] for key in range(len(pool))}
                 spasify_gra = {key: [] for key in range(len(pool))}
+                spasify_gra_residual = {key: [] for key in range(len(pool))}
                 # 如果使用Dirichlet分布划分client数据，则需要在query计算的时候记录client有几条数据，以便于这里gradient的分配。
 
                 # 将梯度返回给各client
@@ -258,7 +262,7 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                     start_grad_idx = 0
                     query_index = torch.tensor(query_num).cumsum(dim=0)
                     
-                    
+                    sum_gradient = torch.zeros(gradient[0:1].size()).to(float).to(local_rank)
                     for j in range(len(pool)):
 #                         if j==0:
 #                             gradient_dict[j] = gradient[0:query_index[j], :]
@@ -269,15 +273,96 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
 #                         gradient_dict[j].size()==[bs, 64, input_size, input_size]
                         if (pool[j]) < rich_clients: # if client is rich. Implement hetero backward.
                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + rich_clients_batch_size]
-#                             spasify_gra[j] = sparsify(gradient_dict[j], compress_ratio=0.4, num_grad=rich_clients_batch_size)
-#                             sum_gradient_dict[j] = 
+                            # 每个client分开稀疏化再求和, 还是先求和再稀疏化?
+#                             if args.momentum_compensate:
+#                                 if args.nesterov:
+#                                     sfl.velocities[j], sfl.momentums[j] = conpensate(
+#                                         gradient_dict[j].sum(dim=0), 
+#                                         sfl.momentums[j].to(device), sfl.velocities[j].to(device))
+#                                     spasify_gra, spasify_gra_residual, indices = sparsify(
+#                                         sfl.velocities[j].to(device), 
+#                                         compress_ratio=0.7,
+#                                         num_grad=rich_clients_batch_size)
+#                                 else:
+#                                     sfl.momentums[j] = conpensate(
+#                                         gradient_dict[j].sum(dim=0), 
+#                                         sfl.momentums[j].to(device),
+#                                         sfl.velocities[j].to(device))
+#                                     spasify_gra, spasify_gra_residual, indices = sparsify(
+#                                         sfl.momentums[j].to(device), compress_ratio=0.7,
+#                                         num_grad=rich_clients_batch_size)
+#                                 sfl.velocities[j], sfl.momentums[j] = update(
+#                                     sfl.momentums[j].to(device), 
+#                                     sfl.velocities[j].to(device), 
+#                                     indices, momentum_masking=True)
+#                             else:
+#                                 spasify_gra, spasify_gra_residual, indices = sparsify(gradient_dict[j], 
+#                                                                                        compress_ratio=0.8,                                                                                                                      num_grad=rich_clients_batch_size)
+#                             sum_gradient += spasify_gra.sum(dim=0)
+#                             sum_gradient += gradient_dict[j].sum(dim=0)
                             start_grad_idx += rich_clients_batch_size
                         else:
                             gradient_dict[j] = gradient[start_grad_idx: start_grad_idx + args.batch_size]
+#                             if args.momentum_compensate:
+#                                 if args.nesterov:
+#                                     sfl.velocities[j], sfl.momentums[j] = conpensate(
+#                                         gradient_dict[j].sum(dim=0), 
+#                                         sfl.momentums[j].to(device), sfl.velocities[j].to(device))
+#                                     spasify_gra, spasify_gra_residual, indices = sparsify(
+#                                         sfl.velocities[j].to(device), 
+#                                         compress_ratio=0.7, 
+#                                         num_grad=args.batch_size)
+#                                 else:
+#                                     sfl.momentums[j] = conpensate(
+#                                         gradient_dict[j].sum(dim=0), 
+#                                         sfl.momentums[j].to(device), 
+#                                         sfl.velocities[j].to(device))
+#                                     spasify_gra, spasify_gra_residual, indices = sparsify(
+#                                         sfl.momentums[j].to(device), compress_ratio=0.7,
+#                                         num_grad=args.batch_size)
+#                                 sfl.velocities[j], sfl.momentums[j] = update(
+#                                     sfl.momentums[j].to(device), 
+#                                     sfl.velocities[j].to(device), 
+#                                     indices, momentum_masking=True)
+#                             else:
+#                                 spasify_gra, spasify_gra_residual, indices = sparsify(
+#                                     gradient_dict[j].sum(dim=0), 
+#                                     compress_ratio=0.8,   
+#                                     num_grad=args.batch_size)
+#                             sum_gradient += spasify_gra.sum(dim=0)
+#                             sum_gradient += gradient_dict[j].sum(dim=0)
                             start_grad_idx += args.batch_size
+                            
+#                     if args.momentum_compensate:
+#                         if args.nesterov:
+#                             self.velocities, self.momentums = conpensate(sum_gradient, 
+#                                                                                self.momentums, self.velocities)
+#                             spasify_gra, spasify_gra_residual, indices = sparsify(self.velocities, 
+#                                                                                        compress_ratio=0.7,                                                                                                                    num_grad=start_grad_idx)
+#                             self.velocities, self.momentums = update(self.momentums, 
+#                                                                            self.velocities, 
+#                                                                            indices, momentum_masking=True):
+#                         else:
+#                             self.momentums = conpensate(sum_gradient, 
+#                                                            self.momentums, self.velocities)
+#                             spasify_gra, spasify_gra_residual, indices = sparsify(
+#                                 self.momentums, compress_ratio=0.7,
+#                                 num_grad=start_grad_idx)
 
-#                     for j in range(len(pool)):
-#                         sum_gradient_dict[j] = sum_gradient / len(pool)
+#                         self.velocities, self.momentums = update(self.momentums, 
+#                                                                        self.velocities, 
+#                                                                        indices, momentum_masking=True)
+
+#                     for j in range(len(pool)): # 按client拥有的数据量的比例分配梯度
+# #                         if args.momentum_compensate:
+# #                             gradient_dict[j] = spasify_gra / query_index[-1]
+# #                         else:
+#                         gradient_dict[j] = sum_gradient / query_index[-1]
+# #                         print(gradient_dict[j].size()) #torch.Size([1, 64, 32, 32])
+#                         if (pool[j]) < rich_clients:
+#                             gradient_dict[j] = gradient_dict[j].repeat(rich_clients_batch_size,1,1,1)
+#                         else:
+#                             gradient_dict[j] = gradient_dict[j].repeat(args.batch_size, 1,1,1)
 
                 #client backward
                 client_backward(sfl, pool, gradient_dict) # 各client以自己的gradient进行反向传播
@@ -289,7 +374,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             gc.collect() # 这里只是为了避免出现内存泄露
 
             # 利用所有client的梯度(sum_gradient_dict)的时候不做avg
-            if batch == num_batch - 1 or (batch % (num_batch//args.avg_freq) == (num_batch//args.avg_freq) - 1):
+#             if batch == num_batch - 1 or (batch % (num_batch//args.avg_freq) == (num_batch//args.avg_freq) - 1):
+            if batch == num_batch - 1 or batch % args.avg_freq==0:
                 # sync client-side models 
                 # num_batch==len(train_loader[0])，即训练集中batch的数量。
                 # 
