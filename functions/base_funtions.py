@@ -12,7 +12,8 @@ Refer to Thapa et al. https://arxiv.org/abs/2004.12088 for technical details.
 from email.policy import strict
 import torch
 import logging
-from utils import AverageMeter, accuracy, average_weights, setup_logger, SinkhornDistance
+from utils import AverageMeter, accuracy, average_weights, setup_logger
+# from utils import SinkhornDistance
 import pdb
 
 class base_simulator:
@@ -121,12 +122,14 @@ class base_simulator:
                 self.c_optimizer_list[i].zero_grad()
 
 
-    def fedavg(self, pool = None, divergence_aware = False, divergence_measure = False):
+    def fedavg(self, pool = None, net_data_counts = None, divergence_aware = False, divergence_measure = False):
         # 参数divergence_measure的作用：判断是否计算divergence
         # 参数divergence_aware的作用：判断是否计算divergence，并使用由divergence计算得到的\mu对本轮client-side model进行动量更新。
-        sinkhorn = SinkhornDistance(eps=0.1, max_iter=100, reduction=None)
-        
-        global_weights = average_weights(self.model.local_list, pool) 
+#         sinkhorn = SinkhornDistance(eps=0.1, max_iter=100, reduction=None)
+        if net_data_counts is not None:
+            global_weights = weighted_avg_weights(self.model.local_list, net_data_counts=net_data_counts, pool=pool) 
+        else:
+            global_weights = average_weights(self.model.local_list, pool) 
         # 计算client-side model参数的均值
         if divergence_measure:
             divergence_list = []
