@@ -201,12 +201,11 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
                     #是不是应该.detach()啊？client的forward函数的返回值已经做了detach了。
                     # 使用client-side部分对aug1进行表征
                     hidden_query_list[i] = hidden_query #将aug1(query)的表征用一个list保存起来
-                    # simco的方式
-                    hidden_pkey = sfl.c_instance_list[client_id](pkey)
-                    # simmoco的方式
-#                     with torch.no_grad():
-#                         # pass to target 
-#                         hidden_pkey = sfl.c_instance_list[client_id].t_model(pkey).detach()  
+                    if args.loss_type=='simco': # simco的方式
+                        hidden_pkey = sfl.c_instance_list[client_id](pkey)
+                    else:# simmoco的方式
+                        with torch.no_grad():
+                            hidden_pkey = sfl.c_instance_list[client_id].t_model(pkey).detach()  
                         # self.t_model = copy.deepcopy(model)
                         # 在MoCo中，生成key的encoder进行动量更新(而不通过梯度反向传播),因此要使用一个深拷贝的模型，并.detach切断梯度计算链，再计算aug2(key)的表征。
                     hidden_pkey_list[i] = hidden_pkey # 将aug2(key)的表征用一个list保存起来
@@ -230,9 +229,12 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             sfl.s_optimizer.zero_grad()
     
             #server compute
-            loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
-
-#             loss, gradient, accu = sfl.s_instance.compute_simco(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size)
+            if args.loss_type=='moco': # simco的方式
+                loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
+            elif args.loss_type=='simco'::
+                loss, gradient, accu = sfl.s_instance.compute_simco(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size)
+            else:
+                pass
 
             sfl.s_optimizer.step() # with reduced step, to simulate a large batch size.
 
