@@ -44,6 +44,21 @@ def average_weights(w, pool = None):
             w_avg[key] = torch.true_divide(w_avg[key], len(pool))
     return w_avg
 
+def weighted_avg_weights(local_list, net_data_counts:dict, pool = None): 
+    """
+    Returns the average of the weights.
+    （按层名计算列表w中的模型参数的均值，pool表示本次参与计算的model在w中的索引）
+    """
+    w_avg = copy.deepcopy(local_list[0].state_dict())
+    for key in w_avg.keys(): # 按层计算均值
+        if pool is None:
+            for i in range(1, len(local_list)):
+                w_avg[key] += local_list[i].state_dict()[key] * (net_data_counts[i] / sum(net_data_counts.values()))
+        else:
+            for i in range(1, len(pool)):
+                w_avg[key] += local_list[pool[i]].state_dict()[key] * (net_data_counts[pool[i]] / sum(net_data_counts.values()))
+    return w_avg
+
 def accuracy(output, target, topk=(1,)): # 返回top1,top2,...,topk所有的正确率
     """Computes the precision@k for the specified values of k"""
     maxk = max(topk)
@@ -218,6 +233,7 @@ def record_net_data_stats(y_train, net_dataidx_map):
 
 def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_workers, batch_size, noniid_ratio = 1.0, num_class = 10, hetero = False, hetero_string = "0.2_0.8|16|0.8_0.2", is_distributed=False):
     #mearning of default hetero_string = "C_D|B" - dividing clients into two groups, stronger group: C clients has D of the data (batch size = B); weaker group: the other (1-C) clients have (1-D) of the data (batch size = 1).
+    net_data_counts = {i:0 for i in range(num_client)} #记录每个client拥有的数据量
     '''返回所有client的dataloader组成的list'''
     if num_client == 1: # 只有1个client的时候
         # 对于mem_loader和test_loader，num_client为默认值1
@@ -231,6 +247,7 @@ def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_wor
                                                             shuffle=shuffle,
                                                             sampler = train_sampler,
                                                             num_workers=num_workers)]
+        net_data_counts[0] = len(training_data)
     elif num_client > 1:
         if noniid_ratio < 1.0:
             training_subset_list = noniid_alllabel(training_data, num_client, noniid_ratio, num_class, hetero, hetero_string) # TODO: implement non_iid_hetero version.
@@ -249,16 +266,20 @@ def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_wor
             if noniid_ratio == 1.0:
                 if not hetero:
                     training_subset = torch.utils.data.Subset(training_data, list(range(i * (len(training_data)//num_client), (i+1) * (len(training_data)//num_client))))
+                    net_data_counts[i] = len(training_data)//num_client
                 else:
                     if i < rich_client:
                         training_subset = torch.utils.data.Subset(training_data, list(range(i * (rich_data_volume//rich_client), (i+1) * (rich_data_volume//rich_client))))
                         # 为每个rich_client分配rich_data_volume//rich_client条数据
+                        net_data_counts[i] = rich_data_volume//rich_client
                     elif i >= rich_client: # 为非rich_client分配数据
                         heteor_list = list(range(rich_data_volume + (i - rich_client) * (len(training_data) - rich_data_volume) // (num_client - rich_client), rich_data_volume + (i - rich_client + 1) * (len(training_data) - rich_data_volume) // (num_client - rich_client)))
+                        net_data_counts[i] = (len(training_data) - rich_data_volume) // (num_client - rich_client)
                         training_subset = torch.utils.data.Subset(training_data, heteor_list)
                 
             else:
                 training_subset = DatasetSplit(training_data, training_subset_list[i])
+                net_data_counts[i] = len(list(training_subset_list[i]))
             # print(len(training_subset))
             if is_distributed:
                 train_sampler = DistributedSampler(training_subset)
@@ -288,7 +309,7 @@ def get_multiclient_trainloader_list(training_data, num_client, shuffle, num_wor
                 # print(f"batch size is {real_batch_size}")
             training_loader_list.append(subset_training_loader)
     
-    return training_loader_list
+    return training_loader_list, net_data_counts
 
 
 class Subset(torch.utils.data.Dataset):

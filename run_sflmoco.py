@@ -17,7 +17,7 @@ from functions.sfl_functions import client_backward, loss_based_status
 from functions.attack_functions import MIA_attacker, MIA_simulator
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from utils import sparsify, conpensate, update
+# from utils import sparsify, conpensate, update
 import gc
 import os
 VERBOSE = False
@@ -26,7 +26,7 @@ args = get_sfl_args()
 set_deterministic(args.seed)
 
 if args.is_distributed :
-    os.environ['CUDA_VISIBLE_DEVICES'] = "4,6" # SflMoco
+    os.environ['CUDA_VISIBLE_DEVICES'] = "5,6" # SflMoco
     local_rank = int(os.environ["LOCAL_RANK"]) 
     print(f"local_rank: {local_rank}\n")
     world_size = int(os.environ["WORLD_SIZE"]) 
@@ -59,7 +59,7 @@ if args.dirichlet:
         hetero_string = args.hetero_string,
         is_distributed = args.is_distributed)
 else:
-    train_loader, mem_loader, test_loader =create_dataset(
+    train_loader, net_data_counts, mem_loader, test_loader =create_dataset(
         batch_size=args.batch_size,
         num_workers=args.num_workers, 
         shuffle=True, 
@@ -231,8 +231,8 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             #server compute
             if args.loss_type=='moco': # simco的方式
                 loss, gradient, accu = sfl.s_instance.compute(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size) # loss是对比loss，gradient是所有query的梯度, accu是对比acc
-            elif args.loss_type=='simco'::
-                loss, gradient, accu = sfl.s_instance.compute_simco(stack_hidden_query, stack_hidden_pkey, pool = pool, world_size = world_size)
+            elif args.loss_type=='simco':
+                loss, gradient, accu = sfl.s_instance.compute_simco(stack_hidden_query, stack_hidden_pkey, temperature = args.temperature, pool = pool, world_size = world_size)
             else:
                 pass
 
@@ -380,8 +380,14 @@ if not args.resume: # 模型从头训练(而不是resume from checkpoint)
             if batch == num_batch - 1 or batch % args.avg_freq==0:
                 # sync client-side models 
                 # num_batch==len(train_loader[0])，即训练集中batch的数量。
-                # 
-                divergence_list = sfl.fedavg(pool, divergence_aware = args.divergence_aware, divergence_measure = args.divergence_measure)
+                if args.divergence_aware:
+                    divergence_list = sfl.fedavg(pool, divergence_aware = args.divergence_aware, divergence_measure = args.divergence_measure)
+                elif args.dirichlet:
+                    net_data_counts = {i:0 for i in range(args.num_client)}
+                    for i in range(len(pool)):
+                        net_data_counts[i] = sum(traindata_cls_counts[i].values())
+                    
+                divergence_list = sfl.fedavg(pool, net_data_counts=net_data_counts)
                 # 每多少步，对client-side models进行divergence-aware的动量更新。
                 # divergence_list中存放的是每个client-side model参数与参数均值之间的divergence。
                 
