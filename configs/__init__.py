@@ -132,6 +132,8 @@ def get_sfl_args():
     #### optim parameters ###
     parser.add_argument("--freeze_prototypes_niters", default=12, type=int,
                     help="freeze the prototypes during this many iterations from the start(swav==313)")
+    parser.add_argument("--loss_type", type=str, default='moco', 
+                        help="type of loss function: moco, simmoco, simco")
     
     args = parser.parse_args()
 
