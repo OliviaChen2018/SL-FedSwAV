@@ -786,7 +786,7 @@ def get_cifar10_trainloader(batch_size=16, num_workers=2, shuffle=True, num_clie
 
     cifar10_training = torch.utils.data.Subset(cifar10_training, indices)
 
-    cifar10_training_loader = get_multiclient_trainloader_list(cifar10_training, num_client, shuffle, num_workers, batch_size, noniid_ratio, 10, hetero, hetero_string)
+    cifar10_training_loader, net_data_counts = get_multiclient_trainloader_list(cifar10_training, num_client, shuffle, num_workers, batch_size, noniid_ratio, 10, hetero, hetero_string)
 
     return cifar10_training_loader
 
@@ -844,7 +844,7 @@ def get_cifar100_trainloader(batch_size=16, num_workers=2, shuffle=True, num_cli
 
     cifar100_training = torch.utils.data.Subset(cifar100_training, indices)
 
-    cifar100_training_loader = get_multiclient_trainloader_list(cifar100_training, num_client, shuffle, num_workers, batch_size, noniid_ratio, 100, hetero, hetero_string)
+    cifar100_training_loader, net_data_counts = get_multiclient_trainloader_list(cifar100_training, num_client, shuffle, num_workers, batch_size, noniid_ratio, 100, hetero, hetero_string)
 
     return cifar100_training_loader
 
