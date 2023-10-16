@@ -54,26 +54,14 @@
 
 2023.8.3
 1. 新增DDP方式下的dataloader sampler和读取方式.(将类CIFAR_INPUT_ITER的实例作为sampler传入DALIDataloader和pipeline, 并再在DALIDataloader类和所有Pipeline类中新增reset函数, 以便在训练过程中重置dataloader)
-2. examples.py文件为Github( https://github.com/NVIDIA/DALI/issues/1356 )上的sampler的实现模板.(灵感来源)
-3. Dali/test_DDP.py为测试文件, 包含了在DaliDataloader方式下以DDP方式训练resnet模型完成cifar10分类任务的全过程. 
-4. 下一步计划将DDP写入我的模型中.
+2. Dali/test_DDP.py为测试文件, 包含了在DaliDataloader方式下以DDP方式训练resnet模型完成cifar10分类任务的全过程. 
+3. 下一步计划将DDP写入我的模型中.
 
 2023.8.5
-1. 将我的模型的数据读取过程改为使用DDP-Dali的方式.
+1. 将数据读取过程改为使用DDP-Dali的方式.
 
 2023.8.7
 1. Swav不work, loss不降.
-2. 将MocoSFL中的Moco对比训练方式换成了Simco训练方式. (Dual Temperature Helps Contrastive Learning Without Many Negative Samples: Towards Understanding and Simplifying MoCo, CVPR2022)                                                                                                                                   ( https://github.com/ChaoningZhang/Dual-temperature/tree/main )
-3. SimcoSFL的实验结果: lr=0.06(epoch<120), 0.006(120<=epoch<160), 0.0006(epoch>=160), knn_val_accu最好为74.45.
-4. 上述SimcoSFL只是一个初步结果, 调整学习率可能会得到有更好的效果. 
-5. 下一步计划: 
-    1) 调整学习率衰减策略; (猜测MultiStepLR衰减可能会比原始的CosineAnnealingLR好一点, 可以尝试分别在epoch=70, 100, 150, 180, 200时, 调整学习率为0.03, 0.0015, 0.00075, 0,000375, 即减半; 或者学习一下Simco的学习率衰减策略)
-    2) 把Dual Temperature这篇文章看懂; 
-    3) 思考一下SimcoSFL的创新点; 
-    4) 思考一下要用哪些数据集, 做哪些实验, 准备和哪些已有的工作做对比.
-    5) 可以尝试一下单卡训练, 看看acc会不会有提升, 顺便和MocoSFL比较一下单卡训练的显存占用情况(毕竟不需要队列了). 
-    6) 增大batch_size, 看看acc会不会提升.(Simco论文中有做batch_size的对比实验, 256效果最好. 我目前的实验用的bs是16*4 or 16*3)
     
 2023.8.8
-1. 新增实验结果(simcosflV2文件夹中). 目前效果最好的是epoch400_cos_bs64*3.
-2. 修改functions/sflmoco_functions中MultiStepLR策略(非cos)下s_scheduler和c_scheduler_list的定义.
+1. 修改functions/sflmoco_functions中MultiStepLR策略(非cos)下s_scheduler和c_scheduler_list的定义.
